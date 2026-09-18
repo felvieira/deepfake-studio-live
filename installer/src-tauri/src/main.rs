@@ -47,14 +47,20 @@ fn install_info() -> Result<InstallInfo, String> {
 
 /// De onde sai o código do app.
 ///
-/// Hoje: a cópia do repositório ao lado do instalador, o que serve para uso
-/// próprio e para desenvolvimento. Quando for distribuir, este é o ponto em
-/// que se troca por um download do Release de
-/// github.com/felvieira/deepfake-studio-live — repo público, logo sem token.
+/// Procura um checkout subindo a partir do .exe: rodando de dentro do
+/// repositório (desenvolvimento), instala o código local, o que evita baixar
+/// de novo o que já está no disco e permite testar mudanças ainda não
+/// publicadas. Numa máquina limpa nada é encontrado e quem assume é
+/// steps::fetch_app_code, que baixa o Release.
 fn source_dir() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    // Em dev o binário fica em installer/src-tauri/target/debug/.
-    let mut candidate = exe.parent().map(|p| p.to_path_buf());
+    find_checkout(exe.parent())
+}
+
+/// Separada de source_dir() para poder ser testada sem depender de onde o
+/// binário de teste está.
+fn find_checkout(start: Option<&std::path::Path>) -> Result<PathBuf, String> {
+    let mut candidate = start.map(|p| p.to_path_buf());
     while let Some(dir) = candidate {
         if dir.join("run.py").exists() && dir.join("requirements.txt").exists() {
             return Ok(dir);
@@ -62,6 +68,49 @@ fn source_dir() -> Result<PathBuf, String> {
         candidate = dir.parent().map(|p| p.to_path_buf());
     }
     Err("não encontrei o código do aplicativo para instalar".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_checkout;
+
+    /// Um .exe dentro do repositório acha o checkout subindo os diretórios —
+    /// é o que faz o instalador usar o código local em vez de rebaixar o
+    /// Release.
+    #[test]
+    fn finds_checkout_from_nested_dir() {
+        let tmp = std::env::temp_dir().join("dlc-test-checkout");
+        let nested = tmp.join("installer").join("target").join("release");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(tmp.join("run.py"), "").unwrap();
+        std::fs::write(tmp.join("requirements.txt"), "").unwrap();
+
+        let found = find_checkout(Some(&nested)).expect("deveria achar o checkout");
+        assert_eq!(found, tmp);
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// Fora do repositório não acha nada, e o instalador cai para o Release.
+    #[test]
+    fn no_checkout_outside_repo() {
+        let tmp = std::env::temp_dir().join("dlc-test-empty");
+        std::fs::create_dir_all(&tmp).unwrap();
+        assert!(find_checkout(Some(&tmp)).is_err());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// run.py sozinho não basta: sem requirements.txt o passo das
+    /// dependências falharia depois, então é melhor não considerar
+    /// aquilo um checkout válido.
+    #[test]
+    fn partial_checkout_is_not_enough() {
+        let tmp = std::env::temp_dir().join("dlc-test-partial");
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("run.py"), "").unwrap();
+        assert!(find_checkout(Some(&tmp)).is_err());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
 }
 
 #[tauri::command]
