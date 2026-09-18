@@ -29,3 +29,12 @@ switch_states.json
 install.bat
 /.claude
 *.bat
+!install_virtual_camera.bat
+!uninstall_virtual_camera.bat
+!install.bat
+
+# Local agent/session tooling — never publish
+.auto/
+.bot/
+.serena/
+.swarm/
