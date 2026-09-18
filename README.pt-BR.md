@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="media/brand/icon-128.png" alt="" width="96" height="96">
+</p>
+
 <h1 align="center">Deep-Live-Cam — Edição Câmera Virtual</h1>
 
 <p align="center">
@@ -9,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img src="media/demo.gif" alt="Demo GIF" width="800">
+  <img src="media/brand/hero.webp" alt="Deepfake Studio Live" width="860">
 </p>
 
 ---

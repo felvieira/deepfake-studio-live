@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Deepfake Studio Live">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#20252d"/>
+      <stop offset="1" stop-color="#0b0d11"/>
+    </linearGradient>
+    <linearGradient id="solid" x1="0.2" y1="0" x2="0.9" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#aab4c4"/>
+    </linearGradient>
+    <clipPath id="leftHalf"><rect x="0" y="0" width="128" height="256"/></clipPath>
+    <clipPath id="rightHalf"><rect x="128" y="0" width="128" height="256"/></clipPath>
+    <!-- head + neck + shoulder: narrow chin, defined temples -->
+    <path id="bust" d="M128 40c30 0 50 22 50 52 0 20-4 33-11 45-5 9-9 14-11 21-1 5-1 10 0 14 2 6 8 9 18 12 18 5 30 10 38 17 6 5 9 11 9 19v6H55v-6c0-8 3-14 9-19 8-7 20-12 38-17 10-3 16-6 18-12 1-4 1-9 0-14-2-7-6-12-11-21-7-12-11-25-11-45 0-30 20-52 50-52z"/>
+    <clipPath id="bustClip"><use href="#bust"/></clipPath>
+  </defs>
+
+  <rect width="256" height="256" rx="58" fill="url(#bg)"/>
+  <rect x="2" y="2" width="252" height="252" rx="56" fill="none" stroke="#333a46" stroke-width="4"/>
+
+  <!-- left: the real face, solid -->
+  <g transform="translate(128 132) scale(0.88) translate(-128 -128)">
+  <g clip-path="url(#leftHalf)">
+    <use href="#bust" fill="url(#solid)"/>
+  </g>
+
+  <!-- right: the synthesised face, landmark mesh -->
+  <g clip-path="url(#rightHalf)">
+    <g clip-path="url(#bustClip)">
+      <g stroke="#57c9f5" stroke-width="5" fill="none" stroke-linejoin="round">
+        <path d="M128 78l40 22-18 40-22 10z"/>
+        <path d="M128 150l22-10 20 30-42 14z"/>
+        <path d="M168 100l14 34-12 36"/>
+      </g>
+      <g fill="#a5e8ff">
+        <circle cx="128" cy="78" r="8"/>
+        <circle cx="168" cy="100" r="8"/>
+        <circle cx="150" cy="140" r="8"/>
+        <circle cx="182" cy="134" r="8"/>
+        <circle cx="128" cy="150" r="8"/>
+        <circle cx="170" cy="170" r="8"/>
+      </g>
+    </g>
+    <use href="#bust" fill="none" stroke="#57c9f5" stroke-width="8"/>
+  </g>
+
+  <!-- hard split down the centre -->
+  <path d="M128 40v176" stroke="#0b0d11" stroke-width="7"/>
+  </g>
+
+  <!-- live tally -->
+  <circle cx="198" cy="62" r="21" fill="#0b0d11"/>
+  <circle cx="198" cy="62" r="13" fill="#ff2d2d"/>
+</svg>
