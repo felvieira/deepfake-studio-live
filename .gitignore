@@ -49,3 +49,6 @@ installer/node_modules/
 !installer/src-tauri/icons/*.png
 !installer/src/*.png
 installer/src-tauri/gen/
+
+# Instaladores copiados para a VM de teste (artefato de build)
+test-vm/installers/*.exe

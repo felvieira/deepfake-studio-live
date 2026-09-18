@@ -1,0 +1,51 @@
+# Windows descartável para testar o instalador de verdade.
+#
+# Por que existe: o instalador escreve em %LOCALAPPDATA%, cria um venv,
+# baixa mais de 1 GB e registra um driver COM no sistema. Testar isso na
+# máquina de desenvolvimento suja o ambiente e, pior, dá um falso positivo:
+# aqui o Python, o ffmpeg e o driver já existem, então uma instalação pode
+# "funcionar" por acidente. Só uma máquina limpa prova que funciona para
+# quem baixa o setup.exe.
+#
+#   docker compose -p dlc-test up -d     sobe (a primeira vez instala o Windows)
+#   http://localhost:8006                acompanha pelo navegador
+#   docker compose -p dlc-test down -v   descarta tudo, volta ao zero
+#
+# O instalador aparece dentro do Windows como unidade Z:.
+
+services:
+  windows:
+    image: dockurr/windows
+    container_name: dlc-windows-test
+
+    environment:
+      VERSION: "11"
+      RAM_SIZE: "8G"
+      CPU_CORES: "4"
+      # O instalador precisa de ~4 GB e o Windows come o resto.
+      DISK_SIZE: "64G"
+      LANGUAGE: "Portuguese"
+      REGION: "pt-BR"
+      KEYBOARD: "pt-BR"
+
+    devices:
+      - /dev/kvm
+      - /dev/net/tun
+
+    cap_add:
+      - NET_ADMIN
+
+    ports:
+      - "8006:8006"        # desktop no navegador
+      - "3389:3389/tcp"    # RDP, se preferir cliente nativo
+      - "3389:3389/udp"
+
+    volumes:
+      - windows_test_data:/storage
+      # Só leitura: a VM não deve conseguir alterar o que está no host.
+      - ./installers:/shared:ro
+
+    stop_grace_period: 2m
+
+volumes:
+  windows_test_data:
