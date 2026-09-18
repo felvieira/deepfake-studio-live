@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Instalar Deepfake Studio Live</title>
+<style>
+  :root {
+    --bg: #0b0d11;
+    --panel: #14181f;
+    --line: #262d38;
+    --text: #e8edf5;
+    --muted: #8a94a6;
+    --accent: #57c9f5;
+    --live: #ff2d2d;
+    --ok: #4ade80;
+    --warn: #fbbf24;
+    --fail: #f87171;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 28px;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 "Segoe UI", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+  }
+  header { display: flex; align-items: center; gap: 14px; margin-bottom: 4px; }
+  header img { width: 52px; height: 52px; }
+  h1 { font-size: 19px; margin: 0; font-weight: 600; letter-spacing: -0.2px; }
+  .sub { color: var(--muted); font-size: 13px; margin-top: 2px; }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 18px;
+    margin-top: 20px;
+  }
+
+  ol { list-style: none; margin: 0; padding: 0; }
+  li {
+    display: grid;
+    grid-template-columns: 22px 1fr auto;
+    gap: 12px;
+    align-items: start;
+    padding: 11px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  li:last-child { border-bottom: none; }
+  .dot {
+    width: 11px; height: 11px; border-radius: 50%;
+    background: var(--line); margin-top: 6px;
+    transition: background 0.2s;
+  }
+  li[data-state="running"] .dot { background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
+  li[data-state="done"] .dot { background: var(--ok); }
+  li[data-state="degraded"] .dot { background: var(--warn); }
+  li[data-state="failed"] .dot { background: var(--fail); }
+  @keyframes pulse { 50% { opacity: 0.35; } }
+
+  .label { font-weight: 500; }
+  li[data-state="pending"] .label { color: var(--muted); }
+  .msg { color: var(--muted); font-size: 12.5px; margin-top: 2px; word-break: break-word; }
+  .size { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; margin-top: 1px; }
+
+  .bar { height: 3px; background: var(--line); border-radius: 2px; margin-top: 7px; overflow: hidden; }
+  .bar span { display: block; height: 100%; background: var(--accent); width: 0; transition: width 0.25s; }
+
+  footer { display: flex; align-items: center; gap: 12px; margin-top: 22px; }
+  button {
+    background: var(--accent); color: #06212e; border: 0;
+    padding: 11px 22px; border-radius: 8px;
+    font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button:hover:not(:disabled) { filter: brightness(1.08); }
+  button:disabled { opacity: 0.4; cursor: default; }
+  button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); }
+  .status { color: var(--muted); font-size: 12.5px; flex: 1; }
+  .status.error { color: var(--fail); }
+  .status.ok { color: var(--ok); }
+  .tally { width: 8px; height: 8px; border-radius: 50%; background: var(--live); display: inline-block; margin-right: 6px; }
+</style>
+</head>
+<body>
+  <header>
+    <img src="icon.png" alt="">
+    <div>
+      <h1>Deepfake Studio Live</h1>
+      <div class="sub">Instalação — troca de rosto ao vivo com câmera virtual</div>
+    </div>
+  </header>
+
+  <div class="card">
+    <ol id="steps">
+      <li data-step="python" data-state="pending">
+        <div class="dot"></div>
+        <div><div class="label">Python</div><div class="msg"></div><div class="bar"><span></span></div></div>
+        <div class="size"></div>
+      </li>
+      <li data-step="app-code" data-state="pending">
+        <div class="dot"></div>
+        <div><div class="label">Aplicativo</div><div class="msg"></div><div class="bar"><span></span></div></div>
+        <div class="size"></div>
+      </li>
+      <li data-step="dependencies" data-state="pending">
+        <div class="dot"></div>
+        <div><div class="label">Dependências</div><div class="msg"></div><div class="bar"><span></span></div></div>
+        <div class="size"></div>
+      </li>
+      <li data-step="models" data-state="pending">
+        <div class="dot"></div>
+        <div><div class="label">Modelos de IA</div><div class="msg"></div><div class="bar"><span></span></div></div>
+        <div class="size"></div>
+      </li>
+      <li data-step="virtual-camera" data-state="pending">
+        <div class="dot"></div>
+        <div><div class="label">Câmera virtual</div><div class="msg"></div><div class="bar"><span></span></div></div>
+        <div class="size"></div>
+      </li>
+    </ol>
+  </div>
+
+  <footer>
+    <button id="go">Instalar</button>
+    <button id="log" class="ghost" hidden>Ver log</button>
+    <div class="status" id="status"></div>
+  </footer>
+
+<script type="module">
+const { invoke } = window.__TAURI__.core;
+const { listen } = window.__TAURI__.event;
+
+const steps = document.getElementById("steps");
+const go = document.getElementById("go");
+const logBtn = document.getElementById("log");
+const status = document.getElementById("status");
+
+const gb = (n) => (n / 1e9).toFixed(1) + " GB";
+const mb = (n) => (n / 1e6).toFixed(0) + " MB";
+
+function setStatus(text, kind = "") {
+  status.textContent = text;
+  status.className = "status " + kind;
+}
+
+listen("install:step", (event) => {
+  const u = event.payload;
+  const li = steps.querySelector(`[data-step="${u.step}"]`);
+  if (!li) return;
+  li.dataset.state = u.state;
+  li.querySelector(".msg").textContent = u.message || "";
+  const bar = li.querySelector(".bar span");
+  bar.style.width = u.fraction != null ? `${u.fraction * 100}%` : (u.state === "done" ? "100%" : "0");
+  const size = li.querySelector(".size");
+  size.textContent = u.bytes ? `${mb(u.bytes[0])} / ${mb(u.bytes[1])}` : "";
+});
+
+const info = await invoke("install_info").catch((e) => {
+  setStatus(String(e), "error");
+  return null;
+});
+
+if (info) {
+  if (info.installed) {
+    go.textContent = "Abrir";
+    setStatus("Já instalado em " + info.root);
+  } else {
+    const free = info.free_bytes != null ? `, ${gb(info.free_bytes)} livres` : "";
+    setStatus(`Precisa de ${gb(info.required_bytes)}${free}`);
+  }
+}
+
+go.addEventListener("click", async () => {
+  if (go.textContent === "Abrir") {
+    try {
+      await invoke("open_app");
+      setStatus("Aplicativo iniciado", "ok");
+    } catch (e) {
+      setStatus(String(e), "error");
+    }
+    return;
+  }
+
+  go.disabled = true;
+  logBtn.hidden = false;
+  setStatus("Instalando… pode levar vários minutos");
+  try {
+    const accelerator = await invoke("run_install");
+    go.disabled = false;
+    go.textContent = "Abrir";
+    if (accelerator === "CPU") {
+      setStatus("Instalado, mas rodando em CPU — a GPU não foi detectada", "");
+    } else {
+      setStatus(`Instalado — acelerador: ${accelerator}`, "ok");
+    }
+  } catch (e) {
+    go.disabled = false;
+    go.textContent = "Tentar de novo";
+    setStatus(String(e), "error");
+  }
+});
+
+logBtn.addEventListener("click", () => invoke("open_log").catch((e) => setStatus(String(e), "error")));
+</script>
+</body>
+</html>

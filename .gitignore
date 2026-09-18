@@ -42,3 +42,10 @@ install.bat
 # Brand assets are part of the project
 !media/brand/*.png
 !media/brand/*.webp
+
+# Tauri installer build output
+installer/src-tauri/target/
+installer/node_modules/
+!installer/src-tauri/icons/*.png
+!installer/src/*.png
+installer/src-tauri/gen/
