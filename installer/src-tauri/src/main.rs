@@ -98,8 +98,21 @@ async fn run_install(app: AppHandle) -> Result<String, String> {
 
     // 2. Código do app — antes das dependências, porque o venv mora dentro
     //    de app/ e o requirements.txt vem daqui.
-    let source = source_dir()?;
-    if let Err(e) = steps::ensure_app_code(&rep, &source) {
+    //
+    //    Rodando de dentro do repositório (desenvolvimento), copia dali.
+    //    Numa máquina limpa não há repositório, e aí baixa o Release — que
+    //    é público, então não precisa de token.
+    let result = match source_dir() {
+        Ok(source) => {
+            rep.log(&format!("usando código local de {}", source.display()));
+            steps::ensure_app_code(&rep, &source)
+        }
+        Err(_) => {
+            rep.log("sem código local; baixando do Release");
+            steps::fetch_app_code(&client, &rep).await
+        }
+    };
+    if let Err(e) = result {
         rep.failed(Step::AppCode, &e);
         return Err(e);
     }

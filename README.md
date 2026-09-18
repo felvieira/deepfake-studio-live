@@ -30,7 +30,7 @@ What this fork adds:
 |---|---|
 | **Built-in virtual camera** | Upstream tells you to screen-capture the preview window with OBS. Here the processed frames go straight to a virtual camera device that Zoom, Discord, Teams and Meet see as a normal webcam. |
 | **Rebuilt interface** | File and Live are now two clear modes instead of one crowded panel. Advanced options are collapsed by default, so the common path stays short. |
-| **One-step install** | `install.bat` creates the environment, installs dependencies and registers the camera driver. |
+| **Windows installer** | A 2 MB setup.exe that downloads Python, the dependencies, the models and the driver, with real progress and resume. No terminal, no `pip`. |
 | **Bundled UnityCapture driver** | The driver ships in `third_party/`, so there is nothing extra to hunt down. |
 
 Everything else behaves as upstream. If you want the original project, go there — it is the
@@ -63,21 +63,30 @@ You are responsible for what you make with this. Not the authors of this fork, a
 
 ## Installation
 
-**Windows**
+**Windows — installer**
+
+Download [DeepfakeStudioLive-Setup.exe](https://github.com/felvieira/deepfake-studio-live/releases/latest)
+and run it.
+
+It handles everything: Python, the dependencies, the ~1.3 GB of AI models and the virtual
+camera driver. Installs to `%LOCALAPPDATA%\DeepLiveCam` and asks for Administrator
+permission only to register the camera — nothing else needs it.
+
+Every step resumes, so if the download breaks halfway, running it again picks up where it
+stopped. When it finishes it reports which accelerator is active, because a broken CUDA
+setup otherwise shows up only as unexplained slowness.
+
+Needs Windows 10/11 64-bit, `ffmpeg` on your PATH and about 4 GB of free disk space.
+
+**Windows — from source**
 
 ```bash
 install.bat
 ```
 
-This creates the virtual environment, installs the Python dependencies and registers the
-UnityCapture driver. Windows will ask for Administrator permission at the driver step —
-that step needs it; the rest does not.
-
-Requires Python 3.11–3.13 and `ffmpeg` on your PATH.
-
-The first launch downloads roughly 1 GB of models from
-[Hugging Face](https://huggingface.co/hacksider/deep-live-cam). The window will look frozen
-while that happens — progress only shows in the terminal. Downloads resume if interrupted.
+Creates the virtual environment, installs dependencies and registers the driver. The models
+then download on first launch — the window will look frozen while that happens, since
+progress only goes to the terminal.
 
 **Linux / macOS**
 

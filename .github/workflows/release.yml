@@ -1,0 +1,87 @@
+name: Release
+
+# Publica o instalador quando uma tag v* é empurrada.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# O Release resultante carrega o setup.exe e o tarball do código, que é de
+# onde o próprio instalador baixa o app numa máquina limpa (ver
+# steps::fetch_app_code).
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Permite gerar um build de teste sem criar tag.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  installer:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Compilar o Tauri do zero leva minutos; o cache derruba isso nos
+      # builds seguintes.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: installer/src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build installer
+        working-directory: installer
+        run: npx --yes @tauri-apps/cli@2 build
+
+      # Nome fixo: o link "última versão" do README precisa ser estável, e o
+      # bundle sai com o nome do produto e a versão embutidos.
+      - name: Rename bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          src=$(find installer/src-tauri/target/release/bundle/nsis -name "*-setup.exe" | head -1)
+          if [ -z "$src" ]; then
+            echo "instalador não foi gerado" >&2
+            exit 1
+          fi
+          mkdir -p dist
+          cp "$src" "dist/DeepfakeStudioLive-Setup.exe"
+          ls -la dist/
+
+      # Sem tag (workflow_dispatch) não há Release para anexar; o artefato
+      # fica disponível na própria execução.
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: dist/DeepfakeStudioLive-Setup.exe
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/DeepfakeStudioLive-Setup.exe
+          generate_release_notes: true
+          body: |
+            ## Instalação
+
+            Baixe `DeepfakeStudioLive-Setup.exe` e execute.
+
+            O instalador cuida de tudo: Python, dependências, os modelos de
+            IA (~1,3 GB) e o driver da câmera virtual. Instala em
+            `%LOCALAPPDATA%\DeepLiveCam` e não pede privilégio de
+            administrador, exceto para registrar a câmera virtual.
+
+            Precisa de Windows 10/11 64-bit, `ffmpeg` no PATH e cerca de
+            4 GB livres em disco.
+
+            Leia o [aviso sobre uso responsável](https://github.com/felvieira/deepfake-studio-live#disclaimer)
+            antes de usar.

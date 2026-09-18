@@ -121,12 +121,90 @@ pub fn ensure_dependencies(rep: &Reporter) -> Result<(), String> {
     Ok(())
 }
 
-/// Passo 3 — código do app.
+/// Repositório de onde vem o código quando o instalador roda numa máquina
+/// que não tem o projeto. Público de propósito: um Release privado exigiria
+/// um token embutido no .exe distribuído, o que não é segredo nenhum — é
+/// extraível por qualquer um que baixe o instalador.
+const RELEASE_REPO: &str = "felvieira/deepfake-studio-live";
+
+/// Passo 3 — código do app, baixado do Release mais recente.
 ///
-/// Copia de `source` (o repositório) para app/. Quando o instalador for
-/// distribuído, `source` passa a ser um Release baixado de
-/// github.com/felvieira/deepfake-studio-live — que é público, então não
-/// precisa de token.
+/// O tarball do GitHub vem com um diretório raiz do tipo
+/// `deepfake-studio-live-<sha>/`, que precisa ser removido na extração para
+/// o conteúdo cair direto em app/.
+pub async fn fetch_app_code(client: &reqwest::Client, rep: &Reporter) -> Result<(), String> {
+    let dest = paths::app_dir()?;
+    if dest.join("run.py").exists() {
+        rep.done(Step::AppCode, "Aplicativo já instalado");
+        return Ok(());
+    }
+
+    rep.running(Step::AppCode, "Procurando a versão mais recente…");
+
+    // A API pública não precisa de autenticação para um repo público. Sem
+    // token: ver o comentário em RELEASE_REPO.
+    let api = format!("https://api.github.com/repos/{RELEASE_REPO}/releases/latest");
+    let response = client
+        .get(&api)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| format!("não consegui falar com o GitHub: {e}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "não consegui consultar as versões ({}). \
+             Verifique a conexão e tente de novo.",
+            response.status()
+        ));
+    }
+
+    let release: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("resposta inesperada do GitHub: {e}"))?;
+
+    let tag = release
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("desconhecida")
+        .to_string();
+    let tarball = release
+        .get("tarball_url")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "a versão publicada não tem código para baixar".to_string())?
+        .to_string();
+
+    rep.running(Step::AppCode, format!("Baixando {tag}…"));
+    let archive = paths::root()?.join("app-source.tar.gz");
+    download_resumable(
+        client,
+        &DownloadSpec { url: &tarball, target: &archive, expected_size: None },
+        |done, total| {
+            rep.progress(Step::AppCode, format!("Baixando {tag}…"), done, total);
+        },
+    )
+    .await?;
+
+    rep.running(Step::AppCode, "Extraindo…");
+    std::fs::create_dir_all(&dest)
+        .map_err(|e| format!("não consegui criar {}: {e}", dest.display()))?;
+    untar_strip_root(&archive, &dest)?;
+    let _ = std::fs::remove_file(&archive);
+
+    if !dest.join("run.py").exists() {
+        return Err("o pacote baixado não contém run.py".into());
+    }
+
+    rep.done(Step::AppCode, format!("Aplicativo {tag} instalado"));
+    Ok(())
+}
+
+/// Passo 3 (modo local) — copia de `source` em vez de baixar.
+///
+/// Usado quando o instalador roda de dentro do repositório, que é o caso em
+/// desenvolvimento. Numa máquina limpa não existe `source`, e aí
+/// `fetch_app_code` assume.
 pub fn ensure_app_code(rep: &Reporter, source: &Path) -> Result<(), String> {
     let dest = paths::app_dir()?;
     if !source.exists() {
@@ -254,6 +332,61 @@ fn run_checked(command: &mut Command, what: &str) -> Result<(), String> {
     let tail: Vec<&str> = stderr.lines().rev().take(6).collect();
     let tail = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
     Err(format!("falha ao {what}:\n{tail}"))
+}
+
+/// Extrai um tar.gz removendo o primeiro nível de diretório.
+///
+/// O tarball do GitHub embrulha tudo em `<repo>-<sha>/`; sem remover esse
+/// nível o app cairia em app/<repo>-<sha>/run.py e nada acharia nada.
+fn untar_strip_root(archive: &Path, dest: &Path) -> Result<(), String> {
+    let file = std::fs::File::open(archive)
+        .map_err(|e| format!("não consegui abrir {}: {e}", archive.display()))?;
+    let decoder = flate2::read::GzDecoder::new(file);
+    let mut tar = tar::Archive::new(decoder);
+
+    for entry in tar
+        .entries()
+        .map_err(|e| format!("pacote inválido: {e}"))?
+    {
+        let mut entry = entry.map_err(|e| format!("pacote inválido: {e}"))?;
+        let path = entry
+            .path()
+            .map_err(|e| format!("caminho inválido no pacote: {e}"))?
+            .into_owned();
+
+        // Descarta o diretório raiz do tarball.
+        let mut parts = path.components();
+        parts.next();
+        let relative: std::path::PathBuf = parts.collect();
+        if relative.as_os_str().is_empty() {
+            continue;
+        }
+
+        // Um tar malicioso pode trazer `..` para escrever fora do destino.
+        // Improvável vindo do GitHub, mas a checagem é barata e o estrago
+        // não seria.
+        if relative
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err("pacote contém caminho inválido".into());
+        }
+
+        let target = dest.join(&relative);
+        if entry.header().entry_type().is_dir() {
+            std::fs::create_dir_all(&target)
+                .map_err(|e| format!("não consegui criar {}: {e}", target.display()))?;
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("não consegui criar {}: {e}", parent.display()))?;
+        }
+        entry
+            .unpack(&target)
+            .map_err(|e| format!("falha ao extrair {}: {e}", relative.display()))?;
+    }
+    Ok(())
 }
 
 fn unzip(archive: &Path, dest: &Path) -> Result<(), String> {
