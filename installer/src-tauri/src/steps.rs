@@ -281,9 +281,15 @@ pub fn ensure_virtual_camera(rep: &Reporter) -> Result<(), String> {
 
     rep.running(Step::VirtualCamera, "Registrando a câmera virtual (pede permissão)…");
 
+    // Um .bat precisa do cmd, mas o caminho vai depois de /D para desligar
+    // o AutoRun do registro, e como argumento próprio — não concatenado numa
+    // linha de comando que o cmd reinterpretaria se o caminho do usuário
+    // tivesse & ou %.
     let mut command = Command::new("cmd");
     command
-        .args(["/C", &script.to_string_lossy()])
+        .arg("/D")
+        .arg("/C")
+        .arg(script.as_os_str())
         .current_dir(paths::app_dir()?);
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);

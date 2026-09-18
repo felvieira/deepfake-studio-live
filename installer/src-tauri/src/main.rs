@@ -216,10 +216,36 @@ fn open_log() -> Result<(), String> {
     if !path.exists() {
         return Err("ainda não há log de instalação".into());
     }
-    std::process::Command::new("cmd")
-        .args(["/C", "start", "", &path.to_string_lossy()])
-        .spawn()
-        .map_err(|e| format!("não consegui abrir o log: {e}"))?;
+    // Abre pelo shell do Windows em vez de passar o caminho por `cmd /C
+    // start`. O caminho vem de LOCALAPPDATA, não do frontend, mas o cmd
+    // reinterpreta &, ^, % e aspas no que recebe — um perfil de usuário com
+    // um desses caracteres bastaria para o comando fazer outra coisa.
+    // ShellExecuteW recebe o caminho como argumento, sem passar por parser
+    // de linha de comando.
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let verb: Vec<u16> = "open\0".encode_utf16().collect();
+        let result = unsafe {
+            windows_sys::Win32::UI::Shell::ShellExecuteW(
+                std::ptr::null_mut(),
+                verb.as_ptr(),
+                wide.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+            )
+        };
+        // ShellExecuteW devolve > 32 em sucesso; abaixo disso é código de erro.
+        if (result as isize) <= 32 {
+            return Err("não consegui abrir o log".into());
+        }
+    }
     Ok(())
 }
 
