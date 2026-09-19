@@ -65,7 +65,59 @@ pub async fn ensure_python(client: &reqwest::Client, rep: &Reporter) -> Result<(
     if !exe.exists() {
         return Err("o pacote do Python não trouxe python.exe".into());
     }
+
+    ensure_dev_headers(client, rep, &dir).await?;
+
     rep.done(Step::Python, format!("Python {PYTHON_VERSION} pronto"));
+    Ok(())
+}
+
+const PYTHON_NUGET_URL: &str =
+    "https://api.nuget.org/v3-flatcontainer/python/3.12.8/python.3.12.8.nupkg";
+
+/// O embeddable não traz `include/Python.h` nem `libs/python312.lib` — é
+/// deliberadamente uma distribuição de execução, não de desenvolvimento.
+/// Sem esses dois, nenhuma extensão C/Cython consegue compilar contra ele,
+/// não importa quantas ferramentas de build estejam instaladas no sistema:
+/// confirmado reproduzindo localmente a mesma falha do `insightface` com
+/// vcvarsall ativado e o compilador funcionando, e só passando depois de
+/// testar contra um Python instalado normalmente (que tem os dois).
+///
+/// O pacote NuGet oficial `python` da própria Microsoft empacota exatamente
+/// esses dois diretórios (em tools/include/ e tools/libs/) sem trazer o
+/// Python inteiro — é a forma documentada de completar um embeddable para
+/// compilação, sem precisar instalar Visual Studio's Python payload nem o
+/// instalador cheio do python.org.
+async fn ensure_dev_headers(
+    client: &reqwest::Client,
+    rep: &Reporter,
+    python_dir: &Path,
+) -> Result<(), String> {
+    if python_dir.join("include").join("Python.h").exists() {
+        return Ok(());
+    }
+
+    rep.running(Step::Python, "Baixando cabeçalhos de desenvolvimento…");
+    let nuget = paths::root()?.join("python-dev.nupkg");
+    download_resumable(
+        client,
+        &DownloadSpec { url: PYTHON_NUGET_URL, target: &nuget, expected_size: None },
+        |done, total| {
+            rep.progress(Step::Python, "Baixando cabeçalhos…", done, total);
+        },
+    )
+    .await?;
+
+    rep.running(Step::Python, "Instalando cabeçalhos de desenvolvimento…");
+    // O .nupkg é um zip comum; só interessam tools/include e tools/libs.
+    unzip_subdirs(&nuget, python_dir, &[("tools/include", "include"), ("tools/libs", "libs")])?;
+    let _ = std::fs::remove_file(&nuget);
+
+    if !python_dir.join("include").join("Python.h").exists() {
+        return Err(
+            "o pacote de cabeçalhos do Python não trouxe include/Python.h".into(),
+        );
+    }
     Ok(())
 }
 
@@ -345,9 +397,10 @@ pub async fn ensure_dependencies(client: &reqwest::Client, rep: &Reporter) -> Re
         Step::Dependencies,
         "Instalando dependências (demora vários minutos)…",
     );
-    run_checked(
+    run_checked_logged(
         &mut build_command(&python, &["-m", "pip", "install", "-r", &requirements_str]),
         "instalar as dependências",
+        Some(rep),
     )?;
 
     rep.done(Step::Dependencies, "Dependências instaladas");
@@ -579,6 +632,23 @@ fn requirements_line(requirements: &Path, pkg: &str) -> Result<Option<String>, S
 }
 
 fn run_checked(command: &mut Command, what: &str) -> Result<(), String> {
+    run_checked_logged(command, what, None)
+}
+
+/// Como run_checked, mas quando falha grava o stderr inteiro no
+/// install.log (via `rep`) antes de devolver só um resumo pro chamador.
+///
+/// As últimas linhas do stderr de uma falha de compilação costumam ser só
+/// o resumo genérico do pip ("ERROR: Failed building wheel for X") — o
+/// erro real do cl.exe/Cython fica minutos antes, no meio da saída. Cortar
+/// para "as últimas N linhas" perde exatamente a informação que diagnostica
+/// o problema. O log grava tudo; a UI mostra um resumo maior que os 6
+/// linhas de antes, o suficiente pra a maioria dos casos sem inundar a tela.
+fn run_checked_logged(
+    command: &mut Command,
+    what: &str,
+    rep: Option<&Reporter>,
+) -> Result<(), String> {
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
 
@@ -588,10 +658,16 @@ fn run_checked(command: &mut Command, what: &str) -> Result<(), String> {
     if output.status.success() {
         return Ok(());
     }
-    // stderr do pip costuma ser longo; as últimas linhas é que dizem o
-    // motivo real.
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let tail: Vec<&str> = stderr.lines().rev().take(6).collect();
+    if let Some(rep) = rep {
+        rep.log(&format!(
+            "--- falha ao {what}: saída completa ---\n[stdout]\n{stdout}\n[stderr]\n{stderr}\n--- fim ---"
+        ));
+    }
+
+    let tail: Vec<&str> = stderr.lines().rev().take(25).collect();
     let tail = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
     Err(format!("falha ao {what}:\n{tail}"))
 }
@@ -658,6 +734,57 @@ fn unzip(archive: &Path, dest: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dest)
         .map_err(|e| format!("não consegui criar {}: {e}", dest.display()))?;
     zip.extract(dest).map_err(|e| format!("falha ao extrair: {e}"))?;
+    Ok(())
+}
+
+/// Extrai só as entradas de um zip cujo caminho comece por um dos prefixos
+/// em `mappings`, remapeando cada prefixo para uma pasta de destino.
+///
+/// Usado para tirar `tools/include/` e `tools/libs/` de dentro do .nupkg do
+/// Python (que tem muito mais coisa que isso — o pacote inteiro do Python)
+/// sem extrair o resto.
+fn unzip_subdirs(archive: &Path, dest: &Path, mappings: &[(&str, &str)]) -> Result<(), String> {
+    let file = std::fs::File::open(archive)
+        .map_err(|e| format!("não consegui abrir {}: {e}", archive.display()))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("zip inválido: {e}"))?;
+
+    for i in 0..zip.len() {
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| format!("entrada inválida no zip: {e}"))?;
+        let name = entry.name().replace('\\', "/");
+
+        let Some((_, target_root)) = mappings
+            .iter()
+            .find(|(prefix, _)| name.starts_with(&format!("{prefix}/")))
+        else {
+            continue;
+        };
+        let prefix = mappings
+            .iter()
+            .find(|(prefix, _)| name.starts_with(&format!("{prefix}/")))
+            .map(|(p, _)| *p)
+            .unwrap();
+        let relative = &name[prefix.len() + 1..];
+        if relative.is_empty() {
+            continue;
+        }
+
+        let target = dest.join(target_root).join(relative);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&target)
+                .map_err(|e| format!("não consegui criar {}: {e}", target.display()))?;
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("não consegui criar {}: {e}", parent.display()))?;
+        }
+        let mut out = std::fs::File::create(&target)
+            .map_err(|e| format!("não consegui criar {}: {e}", target.display()))?;
+        std::io::copy(&mut entry, &mut out)
+            .map_err(|e| format!("falha ao extrair {}: {e}", target.display()))?;
+    }
     Ok(())
 }
 
