@@ -151,17 +151,18 @@ async fn ensure_build_tools(client: &reqwest::Client, rep: &Reporter) -> Result<
 }
 
 /// Usa o vswhere oficial (vem com todo Visual Studio/Build Tools desde
-/// 2017, em local fixo) para checar se algum compilador C++ está instalado
-/// — sem isso, toda reinstalação baixaria vários GB de novo à toa.
-fn msvc_compiler_present() -> bool {
+/// 2017, em local fixo) para achar uma instalação com o workload de C++.
+/// `None` cobre tanto "vswhere não existe" (nenhum VS/Build Tools no
+/// sistema) quanto "existe mas sem esse componente".
+fn vs_installation_path() -> Option<PathBuf> {
     let vswhere = PathBuf::from(std::env::var("ProgramFiles(x86)").unwrap_or_default())
         .join("Microsoft Visual Studio")
         .join("Installer")
         .join("vswhere.exe");
     if !vswhere.exists() {
-        return false;
+        return None;
     }
-    Command::new(&vswhere)
+    let output = Command::new(&vswhere)
         .args([
             "-latest",
             "-products",
@@ -172,8 +173,71 @@ fn msvc_compiler_present() -> bool {
             "installationPath",
         ])
         .output()
-        .map(|o| o.status.success() && !o.stdout.is_empty())
-        .unwrap_or(false)
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path))
+    }
+}
+
+fn msvc_compiler_present() -> bool {
+    vs_installation_path().is_some()
+}
+
+/// Caminho do script que configura INCLUDE/LIB/PATH para achar cl.exe.
+///
+/// Instalar o Build Tools só coloca os arquivos no disco — nenhum processo,
+/// nem os que o instalador cria depois, herda automaticamente as variáveis
+/// de ambiente que apontam para o compilador. É por isso que, mesmo com o
+/// compilador instalado e detectado (msvc_compiler_present() == true), `pip
+/// install` de um pacote que precisa compilar continuava falhando do
+/// mesmo jeito: o subprocesso do pip não via cl.exe em lugar nenhum. Um
+/// "Developer Command Prompt" resolve isso rodando este script antes de
+/// mais nada — é o que build_command() replica por baixo dos panos.
+fn vcvarsall_path(vs_root: &Path) -> PathBuf {
+    vs_root
+        .join("VC")
+        .join("Auxiliary")
+        .join("Build")
+        .join("vcvarsall.bat")
+}
+
+/// Monta um `cmd /C` que ativa o ambiente do MSVC (se disponível) e então
+/// roda o comando pedido. Sem Visual Studio instalado, roda o comando puro
+/// — cobre o caso em que requirements.txt algum dia não precisar mais
+/// compilar nada.
+fn build_command(python: &Path, args: &[&str]) -> Command {
+    let python_str = python.to_string_lossy();
+    let inner = format!(
+        "\"{}\" {}",
+        python_str,
+        args.iter()
+            .map(|a| format!("\"{a}\""))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+
+    if let Some(vs_root) = vs_installation_path() {
+        let vcvarsall = vcvarsall_path(&vs_root);
+        if vcvarsall.exists() {
+            let mut command = Command::new("cmd");
+            command.args([
+                "/D",
+                "/C",
+                &format!("call \"{}\" amd64 && {inner}", vcvarsall.display()),
+            ]);
+            return command;
+        }
+    }
+
+    let mut command = Command::new(python);
+    command.args(args);
+    command
 }
 
 /// Passo 2 — pip e dependências, direto no Python embeddable.
@@ -251,25 +315,27 @@ pub async fn ensure_dependencies(client: &reqwest::Client, rep: &Reporter) -> Re
     let numpy_spec = requirements_line(&requirements, "numpy")?.unwrap_or_else(|| "numpy".into());
     rep.running(Step::Dependencies, "Preparando numpy e Cython…");
     run_checked(
-        Command::new(&python).args(["-m", "pip", "install", &numpy_spec, "Cython"]),
+        &mut build_command(&python, &["-m", "pip", "install", &numpy_spec, "Cython"]),
         "instalar numpy/Cython",
     )?;
 
     // Este é o passo longo: onnxruntime-gpu e as libs da NVIDIA passam de
     // 1 GB. Sem streaming de progresso por enquanto — o pip não dá números
     // confiáveis para uma barra, e uma barra que mente é pior que nenhuma.
+    //
+    // build_command() ativa o ambiente do MSVC antes de chamar o pip:
+    // instalar o compilador sozinho não basta, porque nenhum processo
+    // herda INCLUDE/LIB/PATH automaticamente — só um "Developer Command
+    // Prompt" (ou o vcvarsall.bat que ele roda) configura isso. Sem essa
+    // ativação, `pip install -r requirements.txt` falhava ao compilar
+    // insightface mesmo com o compilador já instalado e detectado.
+    let requirements_str = requirements.to_string_lossy();
     rep.running(
         Step::Dependencies,
         "Instalando dependências (demora vários minutos)…",
     );
     run_checked(
-        Command::new(&python).args([
-            "-m",
-            "pip",
-            "install",
-            "-r",
-            &requirements.to_string_lossy(),
-        ]),
+        &mut build_command(&python, &["-m", "pip", "install", "-r", &requirements_str]),
         "instalar as dependências",
     )?;
 
