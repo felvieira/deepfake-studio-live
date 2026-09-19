@@ -39,10 +39,13 @@ pub async fn ensure_python(client: &reqwest::Client, rep: &Reporter) -> Result<(
     let exe = dir.join("python.exe");
     if exe.exists() {
         rep.done(Step::Python, format!("Python {PYTHON_VERSION} já instalado"));
-        // Ainda assim confere os headers: uma instalação de antes desta
-        // função existir (ou interrompida entre extrair o embeddable e
-        // baixar os headers) deixaria python.exe presente sem eles, e o
-        // early-return acima faria a checagem nunca rodar de novo.
+        // Ainda assim reaplica os dois ajustes seguintes, mesmo já tendo
+        // "terminado" este passo antes: cada um foi adicionado depois que
+        // python.exe já podia existir de uma tentativa anterior, e sem
+        // reaplicar aqui uma reinstalação nunca fecharia essa lacuna — foi
+        // exatamente isso que aconteceu com fix_pth_restrictions ao ser
+        // adicionada. Os dois são baratos e idempotentes.
+        fix_pth_restrictions(&dir, &paths::app_dir()?)?;
         return ensure_dev_headers(client, rep, &dir).await;
     }
 
