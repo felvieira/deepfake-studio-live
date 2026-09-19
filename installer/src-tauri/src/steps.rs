@@ -226,11 +226,22 @@ fn build_command(python: &Path, args: &[&str]) -> Command {
         let vcvarsall = vcvarsall_path(&vs_root);
         if vcvarsall.exists() {
             let mut command = Command::new("cmd");
-            command.args([
-                "/D",
-                "/C",
-                &format!("call \"{}\" amd64 && {inner}", vcvarsall.display()),
-            ]);
+            // Command::args() faz o quoting automático de cada argumento
+            // antes de montar a linha de comando que o Windows recebe — e
+            // como este argumento já tem aspas internas (em volta do
+            // caminho do vcvarsall.bat, que tem espaços), esse quoting
+            // automático as escapa com barra invertida, o que o cmd.exe não
+            // entende: ele via `\"C:\Program Files\...\"` literal em vez de
+            // um caminho entre aspas, e recusava com "não é reconhecido
+            // como um comando". raw_arg() passa a string exatamente como
+            // está, sem esse processamento — que é o que este caso exige,
+            // já que estamos montando a linha de comando à mão.
+            command.raw_arg("/D");
+            command.raw_arg("/C");
+            command.raw_arg(format!(
+                "\"call \"{}\" amd64 && {inner}\"",
+                vcvarsall.display()
+            ));
             return command;
         }
     }
