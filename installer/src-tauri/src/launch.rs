@@ -11,7 +11,9 @@
 //! e deixa o run.py cuidar do resto. O que não pode faltar é o cwd — sem ele
 //! o run.py calcula project_root errado.
 
-use std::process::Command;
+use std::fs::File;
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -38,18 +40,56 @@ pub fn launch_app() -> Result<u32, String> {
         ));
     }
 
+    // stdout/stderr do processo iam para lugar nenhum: CREATE_NO_WINDOW
+    // suprime o console, e sem um Stdio explícito o Rust também não os
+    // captura. Se run.py levantar uma exceção antes de a janela do Qt
+    // abrir — import faltando, erro do onnxruntime na inicialização — o
+    // processo morre e não sobra rastro nenhum de por quê, nem para o
+    // usuário nem para quem for depurar depois. Redireciona para um
+    // arquivo em vez de Stdio::piped(): o app roda solto após este
+    // comando retornar, então não há como (nem por quê) manter um handle
+    // vivo lendo a saída.
+    let log_path = crate::paths::logs_dir()?.join("app.log");
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("não consegui criar {}: {e}", parent.display()))?;
+    }
+    let stdout_file = File::create(&log_path)
+        .map_err(|e| format!("não consegui criar {}: {e}", log_path.display()))?;
+    let stderr_file = stdout_file
+        .try_clone()
+        .map_err(|e| format!("não consegui preparar o log: {e}"))?;
+
     let mut command = Command::new(&python);
     command.arg("run.py");
     // cwd em app/: run.py deriva project_root do próprio caminho, mas o
     // resto do projeto (switch_states.json, models/) é relativo ao cwd.
     command.current_dir(&app_dir);
+    command.stdout(Stdio::from(stdout_file));
+    command.stderr(Stdio::from(stderr_file));
 
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
 
-    let child = command
+    let mut child = command
         .spawn()
         .map_err(|e| format!("não consegui iniciar o app: {e}"))?;
+
+    // Um crash na inicialização (import faltando, exceção antes da janela
+    // abrir) normalmente acontece em menos de um segundo. Uma pausa curta
+    // aqui troca isso por um erro imediato e legível em vez de deixar o
+    // usuário olhando pra tela achando que "não fez nada".
+    std::thread::sleep(Duration::from_millis(800));
+    if let Ok(Some(status)) = child.try_wait() {
+        let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+        let tail: Vec<&str> = log.lines().rev().take(20).collect();
+        let tail = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
+        return Err(format!(
+            "o aplicativo fechou logo após abrir (código {}).\n{}",
+            status.code().map(|c| c.to_string()).unwrap_or_else(|| "desconhecido".into()),
+            if tail.is_empty() { "(sem saída capturada)".to_string() } else { tail }
+        ));
+    }
 
     Ok(child.id())
 }

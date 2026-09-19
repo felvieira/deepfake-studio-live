@@ -8,10 +8,14 @@
   :root {
     --bg: #0b0d11;
     --panel: #14181f;
+    --panel-raised: #191e26;
     --line: #262d38;
+    --line-soft: #1c222c;
     --text: #e8edf5;
     --muted: #8a94a6;
+    --muted-dim: #5b6472;
     --accent: #57c9f5;
+    --accent-dim: #2a4a58;
     --live: #ff2d2d;
     --ok: #4ade80;
     --warn: #fbbf24;
@@ -27,47 +31,125 @@
     -webkit-font-smoothing: antialiased;
     user-select: none;
   }
-  header { display: flex; align-items: center; gap: 14px; margin-bottom: 4px; }
-  header img { width: 52px; height: 52px; }
-  h1 { font-size: 19px; margin: 0; font-weight: 600; letter-spacing: -0.2px; }
-  .sub { color: var(--muted); font-size: 13px; margin-top: 2px; }
+
+  header { display: flex; align-items: center; gap: 14px; margin-bottom: 22px; }
+  header img { width: 44px; height: 44px; border-radius: 10px; }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; letter-spacing: -0.2px; }
+  .sub { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
 
   .card {
     background: var(--panel);
     border: 1px solid var(--line);
     border-radius: 12px;
-    padding: 18px;
-    margin-top: 20px;
+    padding: 6px 18px;
   }
 
   ol { list-style: none; margin: 0; padding: 0; }
   li {
     display: grid;
-    grid-template-columns: 22px 1fr auto;
-    gap: 12px;
-    align-items: start;
-    padding: 11px 0;
-    border-bottom: 1px solid var(--line);
+    grid-template-columns: 26px 1fr;
+    gap: 14px;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--line-soft);
   }
   li:last-child { border-bottom: none; }
-  .dot {
-    width: 11px; height: 11px; border-radius: 50%;
-    background: var(--line); margin-top: 6px;
-    transition: background 0.2s;
+
+  /* Marcador: anel vazio (pendente), preenchido com check (concluído),
+     spinner girando (rodando), triângulo (degradado/aviso), X (falhou). */
+  .marker {
+    width: 22px; height: 22px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    margin-top: 1px;
+    border: 2px solid var(--line);
+    color: transparent;
+    font-size: 13px;
+    transition: border-color 0.2s, background 0.2s;
+    flex-shrink: 0;
   }
-  li[data-state="running"] .dot { background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
-  li[data-state="done"] .dot { background: var(--ok); }
-  li[data-state="degraded"] .dot { background: var(--warn); }
-  li[data-state="failed"] .dot { background: var(--fail); }
-  @keyframes pulse { 50% { opacity: 0.35; } }
+  li[data-state="pending"] .marker { border-color: var(--line); }
+  li[data-state="running"] .marker {
+    border-color: var(--accent-dim);
+    border-top-color: var(--accent);
+    animation: spin 0.8s linear infinite;
+  }
+  li[data-state="done"] .marker {
+    border-color: var(--ok);
+    background: var(--ok);
+    color: #06210f;
+  }
+  li[data-state="done"] .marker::after { content: "✓"; font-weight: 700; }
+  li[data-state="degraded"] .marker {
+    border-color: var(--warn);
+    background: var(--warn);
+    color: #3a2a04;
+  }
+  li[data-state="degraded"] .marker::after { content: "!"; font-weight: 700; }
+  li[data-state="failed"] .marker {
+    border-color: var(--fail);
+    background: var(--fail);
+    color: #3a0d0d;
+  }
+  li[data-state="failed"] .marker::after { content: "✕"; font-weight: 700; }
+  @keyframes spin { to { transform: rotate(360deg); } }
 
-  .label { font-weight: 500; }
-  li[data-state="pending"] .label { color: var(--muted); }
-  .msg { color: var(--muted); font-size: 12.5px; margin-top: 2px; word-break: break-word; }
-  .size { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; margin-top: 1px; }
+  .row-top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .label { font-weight: 600; font-size: 13.5px; }
+  li[data-state="pending"] .label { color: var(--muted-dim); font-weight: 500; }
+  li[data-state="running"] .label { color: var(--text); }
 
-  .bar { height: 3px; background: var(--line); border-radius: 2px; margin-top: 7px; overflow: hidden; }
-  .bar span { display: block; height: 100%; background: var(--accent); width: 0; transition: width 0.25s; }
+  .pct {
+    font-variant-numeric: tabular-nums;
+    font-size: 12px;
+    color: var(--accent);
+    font-weight: 600;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  li[data-state="running"] .pct { opacity: 1; }
+
+  .msg {
+    color: var(--muted);
+    font-size: 12px;
+    margin-top: 3px;
+    word-break: break-word;
+    min-height: 15px;
+  }
+  li[data-state="pending"] .msg { color: var(--muted-dim); }
+
+  .bar {
+    height: 5px;
+    background: var(--line-soft);
+    border-radius: 3px;
+    margin-top: 8px;
+    overflow: hidden;
+    display: none;
+  }
+  li[data-state="running"] .bar { display: block; }
+  .bar span {
+    display: block;
+    height: 100%;
+    width: 0;
+    border-radius: 3px;
+    background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+    transition: width 0.25s ease-out;
+  }
+  /* Sem fração conhecida (ex.: instalando pacotes): listra animada em vez
+     de uma barra parada em 0%, pra não parecer travado. */
+  .bar.indeterminate span {
+    width: 40% !important;
+    animation: indeterminate 1.3s ease-in-out infinite;
+  }
+  @keyframes indeterminate {
+    0% { margin-left: -40%; }
+    100% { margin-left: 100%; }
+  }
+
+  .size {
+    color: var(--muted-dim);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    margin-top: 3px;
+  }
 
   footer { display: flex; align-items: center; gap: 12px; margin-top: 22px; }
   button {
@@ -76,12 +158,37 @@
     font: inherit; font-weight: 600; cursor: pointer;
   }
   button:hover:not(:disabled) { filter: brightness(1.08); }
-  button:disabled { opacity: 0.4; cursor: default; }
+  button:disabled { opacity: 0.5; cursor: default; }
   button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); }
-  .status { color: var(--muted); font-size: 12.5px; flex: 1; }
+  button.ghost:hover:not(:disabled) { background: var(--panel-raised); color: var(--text); }
+  .status { color: var(--muted); font-size: 12.5px; flex: 1; line-height: 1.4; }
   .status.error { color: var(--fail); }
   .status.ok { color: var(--ok); }
-  .tally { width: 8px; height: 8px; border-radius: 50%; background: var(--live); display: inline-block; margin-right: 6px; }
+
+  .overall {
+    margin-top: 18px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .overall .track {
+    flex: 1;
+    height: 3px;
+    background: var(--line-soft);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .overall .track span {
+    display: block; height: 100%; width: 0;
+    background: var(--accent);
+    transition: width 0.3s ease-out;
+  }
+  .overall .count {
+    font-size: 11px;
+    color: var(--muted-dim);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
 </style>
 </head>
 <body>
@@ -96,31 +203,56 @@
   <div class="card">
     <ol id="steps">
       <li data-step="python" data-state="pending">
-        <div class="dot"></div>
-        <div><div class="label">Python</div><div class="msg"></div><div class="bar"><span></span></div></div>
-        <div class="size"></div>
+        <div class="marker"></div>
+        <div>
+          <div class="row-top"><span class="label">Python</span><span class="pct"></span></div>
+          <div class="msg"></div>
+          <div class="bar"><span></span></div>
+          <div class="size"></div>
+        </div>
       </li>
       <li data-step="app-code" data-state="pending">
-        <div class="dot"></div>
-        <div><div class="label">Aplicativo</div><div class="msg"></div><div class="bar"><span></span></div></div>
-        <div class="size"></div>
+        <div class="marker"></div>
+        <div>
+          <div class="row-top"><span class="label">Aplicativo</span><span class="pct"></span></div>
+          <div class="msg"></div>
+          <div class="bar"><span></span></div>
+          <div class="size"></div>
+        </div>
       </li>
       <li data-step="dependencies" data-state="pending">
-        <div class="dot"></div>
-        <div><div class="label">Dependências</div><div class="msg"></div><div class="bar"><span></span></div></div>
-        <div class="size"></div>
+        <div class="marker"></div>
+        <div>
+          <div class="row-top"><span class="label">Dependências</span><span class="pct"></span></div>
+          <div class="msg"></div>
+          <div class="bar"><span></span></div>
+          <div class="size"></div>
+        </div>
       </li>
       <li data-step="models" data-state="pending">
-        <div class="dot"></div>
-        <div><div class="label">Modelos de IA</div><div class="msg"></div><div class="bar"><span></span></div></div>
-        <div class="size"></div>
+        <div class="marker"></div>
+        <div>
+          <div class="row-top"><span class="label">Modelos de IA</span><span class="pct"></span></div>
+          <div class="msg"></div>
+          <div class="bar"><span></span></div>
+          <div class="size"></div>
+        </div>
       </li>
       <li data-step="virtual-camera" data-state="pending">
-        <div class="dot"></div>
-        <div><div class="label">Câmera virtual</div><div class="msg"></div><div class="bar"><span></span></div></div>
-        <div class="size"></div>
+        <div class="marker"></div>
+        <div>
+          <div class="row-top"><span class="label">Câmera virtual</span><span class="pct"></span></div>
+          <div class="msg"></div>
+          <div class="bar"><span></span></div>
+          <div class="size"></div>
+        </div>
       </li>
     </ol>
+  </div>
+
+  <div class="overall" id="overall" hidden>
+    <div class="track"><span id="overallBar"></span></div>
+    <div class="count" id="overallCount"></div>
   </div>
 
   <footer>
@@ -133,10 +265,15 @@
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
+const STEP_ORDER = ["python", "app-code", "dependencies", "models", "virtual-camera"];
+
 const steps = document.getElementById("steps");
 const go = document.getElementById("go");
 const logBtn = document.getElementById("log");
 const status = document.getElementById("status");
+const overall = document.getElementById("overall");
+const overallBar = document.getElementById("overallBar");
+const overallCount = document.getElementById("overallCount");
 
 const gb = (n) => (n / 1e9).toFixed(1) + " GB";
 const mb = (n) => (n / 1e6).toFixed(0) + " MB";
@@ -146,16 +283,51 @@ function setStatus(text, kind = "") {
   status.className = "status " + kind;
 }
 
+function updateOverallProgress() {
+  const done = STEP_ORDER.filter((s) => {
+    const li = steps.querySelector(`[data-step="${s}"]`);
+    return li && (li.dataset.state === "done" || li.dataset.state === "degraded");
+  }).length;
+  overallBar.style.width = `${(done / STEP_ORDER.length) * 100}%`;
+  overallCount.textContent = `${done}/${STEP_ORDER.length}`;
+}
+
 listen("install:step", (event) => {
   const u = event.payload;
   const li = steps.querySelector(`[data-step="${u.step}"]`);
   if (!li) return;
   li.dataset.state = u.state;
   li.querySelector(".msg").textContent = u.message || "";
-  const bar = li.querySelector(".bar span");
-  bar.style.width = u.fraction != null ? `${u.fraction * 100}%` : (u.state === "done" ? "100%" : "0");
+
+  const bar = li.querySelector(".bar");
+  const barFill = bar.querySelector("span");
+  const pct = li.querySelector(".pct");
+
+  if (u.state === "running") {
+    if (u.fraction != null) {
+      bar.classList.remove("indeterminate");
+      barFill.style.width = `${u.fraction * 100}%`;
+      pct.textContent = `${Math.round(u.fraction * 100)}%`;
+    } else {
+      // Passo em andamento sem fração conhecida (ex.: pip resolvendo
+      // pacotes) — listra animada em vez de uma barra parada em 0%.
+      bar.classList.add("indeterminate");
+      pct.textContent = "";
+    }
+  } else if (u.state === "done") {
+    bar.classList.remove("indeterminate");
+    barFill.style.width = "100%";
+    pct.textContent = "";
+  } else {
+    bar.classList.remove("indeterminate");
+    barFill.style.width = "0";
+    pct.textContent = "";
+  }
+
   const size = li.querySelector(".size");
   size.textContent = u.bytes ? `${mb(u.bytes[0])} / ${mb(u.bytes[1])}` : "";
+
+  updateOverallProgress();
 });
 
 const info = await invoke("install_info").catch((e) => {
@@ -175,17 +347,22 @@ if (info) {
 
 go.addEventListener("click", async () => {
   if (go.textContent === "Abrir") {
+    go.disabled = true;
+    setStatus("Iniciando o aplicativo…");
     try {
       await invoke("open_app");
       setStatus("Aplicativo iniciado", "ok");
     } catch (e) {
       setStatus(String(e), "error");
     }
+    go.disabled = false;
     return;
   }
 
   go.disabled = true;
   logBtn.hidden = false;
+  overall.hidden = false;
+  updateOverallProgress();
   setStatus("Instalando… pode levar vários minutos");
   try {
     const accelerator = await invoke("run_install");
