@@ -39,7 +39,11 @@ pub async fn ensure_python(client: &reqwest::Client, rep: &Reporter) -> Result<(
     let exe = dir.join("python.exe");
     if exe.exists() {
         rep.done(Step::Python, format!("Python {PYTHON_VERSION} já instalado"));
-        return Ok(());
+        // Ainda assim confere os headers: uma instalação de antes desta
+        // função existir (ou interrompida entre extrair o embeddable e
+        // baixar os headers) deixaria python.exe presente sem eles, e o
+        // early-return acima faria a checagem nunca rodar de novo.
+        return ensure_dev_headers(client, rep, &dir).await;
     }
 
     rep.running(Step::Python, format!("Baixando Python {PYTHON_VERSION}…"));
