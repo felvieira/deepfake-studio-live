@@ -773,6 +773,18 @@ fn unzip_subdirs(archive: &Path, dest: &Path, mappings: &[(&str, &str)]) -> Resu
         if relative.is_empty() {
             continue;
         }
+        // O nome vem do zip sem qualquer sanitização; uma entrada como
+        // "tools/include/../../../Windows/evil.dll" escreveria fora de
+        // dest se não for barrada aqui. O NuGet oficial não faz isso, mas
+        // a função é genérica o bastante pra ser reaproveitada com uma
+        // fonte menos confiável mais tarde — mesma checagem que
+        // untar_strip_root já faz para o tarball do GitHub.
+        if Path::new(relative)
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(format!("pacote contém caminho inválido: {name}"));
+        }
 
         let target = dest.join(target_root).join(relative);
         if entry.is_dir() {
