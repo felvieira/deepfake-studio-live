@@ -61,9 +61,15 @@ pub fn launch_app() -> Result<u32, String> {
         .map_err(|e| format!("não consegui preparar o log: {e}"))?;
 
     let mut command = Command::new(&python);
-    command.arg("run.py");
+    command.arg(&entry);
     // cwd em app/: run.py deriva project_root do próprio caminho, mas o
     // resto do projeto (switch_states.json, models/) é relativo ao cwd.
+    //
+    // app/ entrar em sys.path (pra `from modules import ...` resolver) não
+    // é responsabilidade daqui — nem current_dir() nem PYTHONPATH bastam
+    // com o Python embeddable, porque o `._pth` dele ignora os dois. Ver
+    // steps::fix_pth_restrictions, chamada uma vez durante a instalação,
+    // que resolve isso editando o próprio `._pth`.
     command.current_dir(&app_dir);
     command.stdout(Stdio::from(stdout_file));
     command.stderr(Stdio::from(stderr_file));
@@ -111,26 +117,33 @@ pub fn detect_execution_provider() -> Result<String, String> {
     // Reproduz o registro de DLLs do run.py antes de importar onnxruntime —
     // importar direto daria um falso negativo, já que o preâmbulo do run.py
     // é justamente o que torna os providers de GPU carregáveis.
+    //
+    // Duas pastas são checadas, igual ao run.py real (run.py:14-15): não há
+    // mais venv/ desde que a instalação passou a usar o Python embeddable
+    // direto (ver paths::venv_python), então sys.prefix/Lib/site-packages é
+    // onde os pacotes realmente estão — mas o run.py também verifica
+    // venv/Lib/site-packages, sem quebrar se não existir, então este probe
+    // faz o mesmo em vez de assumir qual dos dois é o caminho real.
     let probe = r#"
 import os, sys, json
 root = os.getcwd()
-sp = os.path.join(root, "venv", "Lib", "site-packages")
-dirs = []
-torch_lib = os.path.join(sp, "torch", "lib")
-if os.path.isdir(torch_lib):
-    dirs.append(torch_lib)
-nvidia = os.path.join(sp, "nvidia")
-if os.path.isdir(nvidia):
-    for pkg in os.listdir(nvidia):
-        b = os.path.join(nvidia, pkg, "bin")
-        if os.path.isdir(b):
-            dirs.append(b)
-for d in dirs:
-    os.environ["PATH"] = d + os.pathsep + os.environ["PATH"]
-    try:
-        os.add_dll_directory(d)
-    except (OSError, AttributeError):
-        pass
+for sp in (os.path.join(sys.prefix, "Lib", "site-packages"), os.path.join(root, "venv", "Lib", "site-packages")):
+    dirs = []
+    torch_lib = os.path.join(sp, "torch", "lib")
+    if os.path.isdir(torch_lib):
+        dirs.append(torch_lib)
+    nvidia = os.path.join(sp, "nvidia")
+    if os.path.isdir(nvidia):
+        for pkg in os.listdir(nvidia):
+            b = os.path.join(nvidia, pkg, "bin")
+            if os.path.isdir(b):
+                dirs.append(b)
+    for d in dirs:
+        os.environ["PATH"] = d + os.pathsep + os.environ["PATH"]
+        try:
+            os.add_dll_directory(d)
+        except (OSError, AttributeError):
+            pass
 try:
     import onnxruntime
     print(json.dumps(onnxruntime.get_available_providers()))

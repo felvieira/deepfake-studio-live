@@ -64,7 +64,7 @@ pub async fn ensure_python(client: &reqwest::Client, rep: &Reporter) -> Result<(
     // O embeddable vem com um ._pth que desliga o import de site-packages.
     // Sem corrigir isso, o venv criado a partir dele não enxerga nada do que
     // o pip instalar.
-    enable_site_packages(&dir)?;
+    fix_pth_restrictions(&dir, &paths::app_dir()?)?;
 
     if !exe.exists() {
         return Err("o pacote do Python não trouxe python.exe".into());
@@ -804,11 +804,34 @@ fn unzip_subdirs(archive: &Path, dest: &Path, mappings: &[(&str, &str)]) -> Resu
     Ok(())
 }
 
-/// O Python embeddable vem com `python312._pth` que comenta `import site`.
-/// Com isso o venv não enxerga site-packages e nenhuma dependência carrega.
-fn enable_site_packages(python_dir: &Path) -> Result<(), String> {
+/// Corrige as duas restrições do `._pth` que o Python embeddable vem com
+/// por padrão.
+///
+/// Um arquivo `<versão>._pth` presente faz o Python ignorar TODA forma
+/// usual de montar sys.path — variáveis de ambiente como PYTHONPATH
+/// incluídas — e usar só o que está listado nesse arquivo. Isso quebra
+/// duas coisas ao mesmo tempo, e as duas só aparecem testando de verdade:
+///
+/// 1. `import site` vem comentado, então site-packages nunca é adicionado
+///    e nada que o pip instalar carrega.
+/// 2. sys.path[0] normalmente seria o diretório do script (aqui, app/,
+///    onde run.py mora) — mas o `._pth` também desativa essa adição
+///    automática. `from modules import platform_info` em run.py falhava
+///    com "ModuleNotFoundError: No module named 'modules'" mesmo com
+///    modules/ presente e correto, porque app/ nunca chegava a entrar no
+///    sys.path — nem current_dir() nem PYTHONPATH mudam isso, confirmado
+///    testando os dois isoladamente contra um embeddable real. Só editar
+///    o próprio `._pth` funciona.
+///
+/// `app_dir` ainda pode não existir quando isto roda (é chamado durante o
+/// passo do Python, antes do código do app ser copiado) — o caminho é
+/// gravado de qualquer forma, porque é fixo (sempre root()/app) e o Python
+/// só precisa que ele exista no momento de rodar run.py, não agora.
+fn fix_pth_restrictions(python_dir: &Path, app_dir: &Path) -> Result<(), String> {
     let entries = std::fs::read_dir(python_dir)
         .map_err(|e| format!("não consegui ler {}: {e}", python_dir.display()))?;
+    let app_dir_str = app_dir.to_string_lossy().to_string();
+
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("_pth") {
@@ -816,15 +839,17 @@ fn enable_site_packages(python_dir: &Path) -> Result<(), String> {
         }
         let text = std::fs::read_to_string(&path)
             .map_err(|e| format!("não consegui ler {}: {e}", path.display()))?;
-        if text.contains("\nimport site") && !text.contains("\n#import site") {
-            continue; // já habilitado
+
+        let mut fixed = text.replace("#import site", "import site");
+        if !fixed.contains("import site") {
+            fixed = format!("{}\nimport site\n", fixed.trim_end());
         }
-        let fixed = text.replace("#import site", "import site");
-        let fixed = if fixed.contains("import site") {
-            fixed
-        } else {
-            format!("{}\nimport site\n", fixed.trim_end())
-        };
+        if !fixed.lines().any(|l| l.trim() == app_dir_str) {
+            // Logo depois da primeira linha (o "." padrão do embeddable),
+            // antes do bloco de comentário/import site.
+            fixed = fixed.replacen('\n', &format!("\n{app_dir_str}\n"), 1);
+        }
+
         std::fs::write(&path, fixed)
             .map_err(|e| format!("não consegui escrever {}: {e}", path.display()))?;
     }
