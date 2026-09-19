@@ -116,6 +116,34 @@ pub async fn ensure_dependencies(client: &reqwest::Client, rep: &Reporter) -> Re
         )?;
     }
 
+    // get-pip.py só traz o pip. `insightface` (e outros pacotes do
+    // requirements.txt sem wheel pronto para esta combinação de Python/SO)
+    // precisa compilar sua extensão, e o backend de build PEP 517 padrão
+    // (setuptools.build_meta) não existe se setuptools não estiver
+    // instalado — falha com "BackendUnavailable: Cannot import
+    // 'setuptools.build_meta'". Isso não aparece com o Python do sistema
+    // porque a maioria das instalações já traz setuptools de fábrica.
+    rep.running(Step::Dependencies, "Preparando ferramentas de build…");
+    run_checked(
+        Command::new(&python).args(["-m", "pip", "install", "setuptools", "wheel"]),
+        "instalar setuptools/wheel",
+    )?;
+
+    // insightface importa numpy no próprio setup.py para compilar sua
+    // extensão (numpy.get_include()). O isolamento de build do pip cria um
+    // ambiente novo por pacote, então listar numpy antes de insightface no
+    // requirements.txt não basta — o ambiente de build do insightface não
+    // enxerga o que ainda não foi instalado no ambiente real. numpy precisa
+    // estar instalado ANTES de processar o requirements.txt inteiro.
+    // A versão vem do próprio requirements.txt para não divergir da faixa
+    // que o projeto pede.
+    let numpy_spec = requirements_line(&requirements, "numpy")?.unwrap_or_else(|| "numpy".into());
+    rep.running(Step::Dependencies, "Preparando numpy…");
+    run_checked(
+        Command::new(&python).args(["-m", "pip", "install", &numpy_spec]),
+        "instalar numpy",
+    )?;
+
     // Este é o passo longo: onnxruntime-gpu e as libs da NVIDIA passam de
     // 1 GB. Sem streaming de progresso por enquanto — o pip não dá números
     // confiáveis para uma barra, e uma barra que mente é pior que nenhuma.
@@ -339,6 +367,29 @@ pub fn ensure_virtual_camera(rep: &Reporter) -> Result<(), String> {
 
 // ---------------------------------------------------------------- utilitários
 
+/// Acha a linha de `pkg` num requirements.txt e devolve o especificador
+/// pronto para `pip install` (ex.: "numpy>=2.0,<3"), ignorando comentários.
+/// `None` se o pacote não estiver listado.
+fn requirements_line(requirements: &Path, pkg: &str) -> Result<Option<String>, String> {
+    let text = std::fs::read_to_string(requirements)
+        .map_err(|e| format!("não consegui ler {}: {e}", requirements.display()))?;
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let name = line
+            .split(|c: char| "><=!;~ ".contains(c))
+            .next()
+            .unwrap_or("")
+            .trim();
+        if name.eq_ignore_ascii_case(pkg) {
+            return Ok(Some(line.to_string()));
+        }
+    }
+    Ok(None)
+}
+
 fn run_checked(command: &mut Command, what: &str) -> Result<(), String> {
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
@@ -510,4 +561,54 @@ pub fn free_disk_bytes() -> Result<u64, String> {
 #[cfg(not(windows))]
 pub fn free_disk_bytes() -> Result<u64, String> {
     Err("instalador disponível apenas no Windows".into())
+}
+
+#[cfg(test)]
+mod requirements_tests {
+    use super::requirements_line;
+    use std::io::Write;
+
+    fn write_requirements(name: &str, content: &str) -> std::path::PathBuf {
+        // Nome único por teste: os testes rodam em paralelo por padrão, e um
+        // nome de arquivo compartilhado faz um teste sobrescrever o arquivo
+        // que outro acabou de escrever antes de lê-lo de volta.
+        let path = std::env::temp_dir().join(format!(
+            "dlc-req-test-{}-{}.txt",
+            std::process::id(),
+            name
+        ));
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        path
+    }
+
+    #[test]
+    fn finds_versioned_spec() {
+        let path = write_requirements(
+            "versioned",
+            "numpy>=2.0,<3\nopencv-python==4.14.0.94\n",
+        );
+        let found = requirements_line(&path, "numpy").unwrap();
+        assert_eq!(found, Some("numpy>=2.0,<3".to_string()));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn ignores_platform_marker_and_comments() {
+        let path = write_requirements(
+            "marker",
+            "# a dependency\npygrabber; sys_platform == 'win32'\nnumpy>=2.0,<3  # pinned\n",
+        );
+        let found = requirements_line(&path, "numpy").unwrap();
+        assert_eq!(found, Some("numpy>=2.0,<3".to_string()));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn missing_package_returns_none() {
+        let path = write_requirements("missing", "opencv-python==4.14.0.94\n");
+        let found = requirements_line(&path, "numpy").unwrap();
+        assert_eq!(found, None);
+        std::fs::remove_file(&path).ok();
+    }
 }
