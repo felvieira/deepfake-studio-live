@@ -8,7 +8,7 @@ use crate::download::{download_resumable, DownloadSpec};
 use crate::models::{self, HF_BASE};
 use crate::paths;
 use crate::progress::{Reporter, Step};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[cfg(windows)]
@@ -23,12 +23,14 @@ const PYTHON_VERSION: &str = "3.12.8";
 const PYTHON_URL: &str =
     "https://www.python.org/ftp/python/3.12.8/python-3.12.8-embed-amd64.zip";
 
-/// Espaço necessário, com folga: modelos + venv com onnxruntime-gpu (que
-/// sozinho passa de 1 GB) + Python + margem. Checado ANTES de baixar
-/// qualquer coisa — descobrir que falta espaço com 900 MB já baixados é a
-/// pior hora de descobrir.
+/// Espaço necessário, com folga: modelos + dependências Python com
+/// onnxruntime-gpu (que sozinho passa de 1 GB) + Python + as ferramentas de
+/// build do C++ (só o workload VCTools, mas ainda assim ~2-3 GB — ver
+/// ensure_build_tools) + margem. Checado ANTES de baixar qualquer coisa —
+/// descobrir que falta espaço com 900 MB já baixados é a pior hora de
+/// descobrir.
 pub fn required_bytes() -> u64 {
-    models::total_bytes() + 3 * 1024 * 1024 * 1024
+    models::total_bytes() + 6 * 1024 * 1024 * 1024
 }
 
 /// Passo 1 — Python embeddable.
@@ -69,6 +71,111 @@ pub async fn ensure_python(client: &reqwest::Client, rep: &Reporter) -> Result<(
 
 const GET_PIP_URL: &str = "https://bootstrap.pypa.io/get-pip.py";
 
+/// Bootstrapper oficial da Microsoft — só baixa o instalador (poucos MB); os
+/// componentes de verdade (compilador + Windows SDK, alguns GB) ele busca
+/// sozinho na hora de instalar.
+const VS_BUILDTOOLS_URL: &str = "https://aka.ms/vs/17/release/vs_BuildTools.exe";
+
+/// Garante o compilador MSVC no sistema.
+///
+/// `insightface==0.7.3` não tem wheel pré-compilado para nenhuma plataforma
+/// no PyPI — só existe o sdist — e seu setup.py compila uma extensão
+/// Cython/C. O upstream (hacksider/Deep-Live-Cam) documenta isso como
+/// pré-requisito manual: "Visual Studio 2022 Runtimes — Visual C++ Build
+/// Tools". Numa máquina de desenvolvimento isso quase sempre já está
+/// presente — Visual Studio é comum — e por isso o requisito nunca aparecia
+/// nos testes até rodar numa VM realmente limpa.
+///
+/// Instala só o workload VCTools (compilador + Windows SDK), não o Visual
+/// Studio inteiro — ainda assim leva vários minutos e alguns GB, e é o
+/// único outro passo que pede elevação além da câmera virtual.
+async fn ensure_build_tools(client: &reqwest::Client, rep: &Reporter) -> Result<(), String> {
+    if msvc_compiler_present() {
+        rep.log("compilador MSVC já presente, pulando Build Tools");
+        return Ok(());
+    }
+
+    rep.running(
+        Step::Dependencies,
+        "Baixando as ferramentas de compilação do Windows…",
+    );
+    let installer = paths::root()?.join("vs_buildtools.exe");
+    download_resumable(
+        client,
+        &DownloadSpec { url: VS_BUILDTOOLS_URL, target: &installer, expected_size: None },
+        |_, _| {},
+    )
+    .await?;
+
+    rep.running(
+        Step::Dependencies,
+        "Instalando ferramentas de compilação (pede permissão; demora vários minutos)…",
+    );
+    // --passive: mostra progresso sem exigir clique; --wait: o instalador da
+    // Microsoft normalmente se desacopla do processo pai e retorna na hora,
+    // então sem isso achamos (erradamente) que já terminou.
+    let output = Command::new(&installer)
+        .args([
+            "--quiet",
+            "--wait",
+            "--norestart",
+            "--nocache",
+            "--add",
+            "Microsoft.VisualStudio.Workload.VCTools",
+            "--includeRecommended",
+        ])
+        .output()
+        .map_err(|e| format!("não consegui iniciar o instalador de build tools: {e}"))?;
+
+    // 3010 = sucesso, mas pede reinício do Windows — não impede pip install
+    // funcionar nesta mesma sessão, então trata como sucesso.
+    let code = output.status.code().unwrap_or(-1);
+    if !(output.status.success() || code == 3010) {
+        return Err(format!(
+            "instalação das ferramentas de compilação falhou (código {code}). \
+             Instale manualmente o 'Visual C++ Build Tools' e tente de novo."
+        ));
+    }
+
+    if !msvc_compiler_present() {
+        return Err(
+            "as ferramentas de compilação foram instaladas, mas o compilador \
+             não foi encontrado — pode ser necessário reiniciar o Windows e \
+             tentar de novo"
+                .into(),
+        );
+    }
+
+    rep.log("Build Tools instalado com sucesso");
+    Ok(())
+}
+
+/// Usa o vswhere oficial (vem com todo Visual Studio/Build Tools desde
+/// 2017, em local fixo) para checar se algum compilador C++ está instalado
+/// — sem isso, toda reinstalação baixaria vários GB de novo à toa.
+fn msvc_compiler_present() -> bool {
+    let vswhere = PathBuf::from(std::env::var("ProgramFiles(x86)").unwrap_or_default())
+        .join("Microsoft Visual Studio")
+        .join("Installer")
+        .join("vswhere.exe");
+    if !vswhere.exists() {
+        return false;
+    }
+    Command::new(&vswhere)
+        .args([
+            "-latest",
+            "-products",
+            "*",
+            "-requires",
+            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            "-property",
+            "installationPath",
+        ])
+        .output()
+        .map(|o| o.status.success() && !o.stdout.is_empty())
+        .unwrap_or(false)
+}
+
 /// Passo 2 — pip e dependências, direto no Python embeddable.
 ///
 /// O embeddable não traz `pip` nem `ensurepip` (nem `venv` — ver o comentário
@@ -94,6 +201,8 @@ pub async fn ensure_dependencies(client: &reqwest::Client, rep: &Reporter) -> Re
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
+
+    ensure_build_tools(client, rep).await?;
 
     if !has_pip {
         rep.running(Step::Dependencies, "Preparando o instalador de pacotes…");
@@ -129,19 +238,21 @@ pub async fn ensure_dependencies(client: &reqwest::Client, rep: &Reporter) -> Re
         "instalar setuptools/wheel",
     )?;
 
-    // insightface importa numpy no próprio setup.py para compilar sua
-    // extensão (numpy.get_include()). O isolamento de build do pip cria um
-    // ambiente novo por pacote, então listar numpy antes de insightface no
-    // requirements.txt não basta — o ambiente de build do insightface não
-    // enxerga o que ainda não foi instalado no ambiente real. numpy precisa
-    // estar instalado ANTES de processar o requirements.txt inteiro.
-    // A versão vem do próprio requirements.txt para não divergir da faixa
-    // que o projeto pede.
+    // insightface compila extensões Cython/C e seu setup.py importa numpy e
+    // Cython diretamente (numpy.get_include(), cythonize()) para fazer isso.
+    // O isolamento de build do pip cria um ambiente novo por pacote, então
+    // listar numpy/Cython antes de insightface no requirements.txt não
+    // basta — o ambiente de build do insightface não enxerga o que ainda
+    // não foi instalado no ambiente real. Precisam existir ANTES de
+    // processar o requirements.txt inteiro. A versão do numpy vem do
+    // próprio requirements.txt para não divergir da faixa que o projeto
+    // pede; Cython não está listado lá — só é preciso para compilar, o
+    // pacote final não depende dele em runtime — então vai sem pin.
     let numpy_spec = requirements_line(&requirements, "numpy")?.unwrap_or_else(|| "numpy".into());
-    rep.running(Step::Dependencies, "Preparando numpy…");
+    rep.running(Step::Dependencies, "Preparando numpy e Cython…");
     run_checked(
-        Command::new(&python).args(["-m", "pip", "install", &numpy_spec]),
-        "instalar numpy",
+        Command::new(&python).args(["-m", "pip", "install", &numpy_spec, "Cython"]),
+        "instalar numpy/Cython",
     )?;
 
     // Este é o passo longo: onnxruntime-gpu e as libs da NVIDIA passam de
