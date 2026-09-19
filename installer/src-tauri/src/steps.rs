@@ -67,14 +67,19 @@ pub async fn ensure_python(client: &reqwest::Client, rep: &Reporter) -> Result<(
     Ok(())
 }
 
-/// Passo 2 — venv e dependências.
+const GET_PIP_URL: &str = "https://bootstrap.pypa.io/get-pip.py";
+
+/// Passo 2 — pip e dependências, direto no Python embeddable.
 ///
-/// Depende do passo 3 (código do app) já ter acontecido, porque o venv mora
-/// dentro de app/ — ver o comentário em paths::venv_dir sobre as DLLs da
-/// NVIDIA.
-pub fn ensure_dependencies(rep: &Reporter) -> Result<(), String> {
-    let venv = paths::venv_dir()?;
-    let venv_python = paths::venv_python()?;
+/// O embeddable não traz `pip` nem `ensurepip` (nem `venv` — ver o comentário
+/// em paths::venv_python). A forma oficial de destravar pip nele é baixar
+/// get-pip.py e rodá-lo; depois disso ele se comporta como qualquer outro
+/// Python para fins de `pip install`.
+///
+/// Depende do passo 3 (código do app) já ter acontecido, porque
+/// requirements.txt vem de lá.
+pub async fn ensure_dependencies(client: &reqwest::Client, rep: &Reporter) -> Result<(), String> {
+    let python = paths::venv_python()?;
     let requirements = paths::app_dir()?.join("requirements.txt");
 
     if !requirements.exists() {
@@ -84,20 +89,32 @@ pub fn ensure_dependencies(rep: &Reporter) -> Result<(), String> {
         ));
     }
 
-    if !venv_python.exists() {
-        rep.running(Step::Dependencies, "Criando o ambiente virtual…");
-        let base_python = paths::python_dir()?.join("python.exe");
+    let has_pip = Command::new(&python)
+        .args(["-m", "pip", "--version"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if !has_pip {
+        rep.running(Step::Dependencies, "Preparando o instalador de pacotes…");
+        let get_pip = paths::root()?.join("get-pip.py");
+        download_resumable(
+            client,
+            &DownloadSpec { url: GET_PIP_URL, target: &get_pip, expected_size: None },
+            |_, _| {},
+        )
+        .await?;
         run_checked(
-            Command::new(&base_python).args(["-m", "venv", &venv.to_string_lossy()]),
-            "criar o ambiente virtual",
+            // --no-warn-script-location: os scripts (pip.exe etc.) vão para
+            // Scripts/, que não está no PATH deste Python isolado — e não
+            // precisa estar, já que só o instalador o invoca diretamente.
+            Command::new(&python).args([
+                get_pip.to_string_lossy().as_ref(),
+                "--no-warn-script-location",
+            ]),
+            "instalar o pip",
         )?;
     }
-
-    rep.running(Step::Dependencies, "Atualizando o pip…");
-    run_checked(
-        Command::new(&venv_python).args(["-m", "pip", "install", "--upgrade", "pip"]),
-        "atualizar o pip",
-    )?;
 
     // Este é o passo longo: onnxruntime-gpu e as libs da NVIDIA passam de
     // 1 GB. Sem streaming de progresso por enquanto — o pip não dá números
@@ -107,7 +124,7 @@ pub fn ensure_dependencies(rep: &Reporter) -> Result<(), String> {
         "Instalando dependências (demora vários minutos)…",
     );
     run_checked(
-        Command::new(&venv_python).args([
+        Command::new(&python).args([
             "-m",
             "pip",
             "install",

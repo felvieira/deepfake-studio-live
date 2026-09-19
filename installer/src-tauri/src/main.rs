@@ -2,13 +2,13 @@
 
 //! Instalador do Deepfake Studio Live.
 //!
-//! Instala em %LOCALAPPDATA%\DeepLiveCam: Python embeddable, venv com as
-//! dependências, o código do app, os modelos ONNX e o driver da câmera
-//! virtual. Depois abre o app.
+//! Instala em %LOCALAPPDATA%\DeepLiveCam: Python embeddable com pip e as
+//! dependências instaladas nele diretamente (sem venv — ver
+//! paths::venv_python), o código do app, os modelos ONNX e o driver da
+//! câmera virtual. Depois abre o app.
 //!
-//! Dois cuidados que não são óbvios e estão documentados onde importam:
-//! o venv precisa ficar dentro de app/ (paths::venv_dir) e a queda para CPU
-//! do onnxruntime é silenciosa (launch::detect_execution_provider).
+//! A queda do onnxruntime para CPU é silenciosa — ver
+//! launch::detect_execution_provider, que existe só por causa disso.
 
 mod download;
 mod launch;
@@ -35,7 +35,16 @@ struct InstallInfo {
 #[tauri::command]
 fn install_info() -> Result<InstallInfo, String> {
     let root = paths::root()?;
-    let installed = paths::venv_python()?.exists() && paths::app_dir()?.join("run.py").exists();
+    // python.exe existir só prova que o passo 1 rodou. Checar um pacote que
+    // só existe depois do `pip install -r requirements.txt` terminar evita
+    // reportar "já instalado" numa instalação que parou no meio — como a
+    // que motivou esta função a existir (venv sem pip, deps nunca chegaram
+    // a instalar).
+    let deps_marker = paths::python_dir()?
+        .join("Lib")
+        .join("site-packages")
+        .join("onnxruntime");
+    let installed = deps_marker.exists() && paths::app_dir()?.join("run.py").exists();
     Ok(InstallInfo {
         installed,
         root: root.to_string_lossy().to_string(),
@@ -167,7 +176,7 @@ async fn run_install(app: AppHandle) -> Result<String, String> {
     }
 
     // 3. Dependências
-    if let Err(e) = steps::ensure_dependencies(&rep) {
+    if let Err(e) = steps::ensure_dependencies(&client, &rep).await {
         rep.failed(Step::Dependencies, &e);
         return Err(e);
     }

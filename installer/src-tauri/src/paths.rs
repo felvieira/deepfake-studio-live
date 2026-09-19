@@ -20,23 +20,27 @@ pub fn python_dir() -> Result<PathBuf, String> {
     Ok(root()?.join("python"))
 }
 
-/// O venv vive DENTRO de app/, não ao lado.
+/// Não existe venv de verdade: o Python embeddable oficial não inclui o
+/// módulo `venv` nem `pip` (é uma distribuição deliberadamente mínima —
+/// sem ensurepip, sem tkinter). Rodar `python -m venv` nele falha com
+/// "No module named venv" — só se descobre isso testando numa máquina
+/// sem outro Python instalado, porque em dev sempre havia um Python do
+/// sistema por perto para criar o venv.
 ///
-/// run.py:15 monta o caminho das DLLs da NVIDIA como
-/// `<pasta do run.py>/venv/Lib/site-packages/nvidia/*/bin` e passa cada um
-/// para os.add_dll_directory(). Com o venv em qualquer outro lugar esse
-/// laço não encontra nada, o onnxruntime não carrega cuDNN/cuBLAS e o app
-/// cai para CPU **sem erro nenhum** — só fica lento. Mover o venv daqui
-/// quebra a aceleração de GPU de um jeito que nenhum teste de instalação
-/// pega.
-pub fn venv_dir() -> Result<PathBuf, String> {
-    Ok(app_dir()?.join("venv"))
-}
-
-/// Python do venv. É este que roda o app — nunca o Python do sistema, que
-/// pode não ter as dependências nem a versão certa.
+/// A saída é não precisar de venv: instalamos o pip nesse próprio Python
+/// (get-pip.py) e instalamos as dependências direto nele, sem isolar em
+/// outra pasta. Ele já é auto-contido dentro de python_dir(), então isso
+/// não "suja" nada do sistema — o embeddable inteiro é descartável.
+///
+/// O motivo de ainda existir esta função, e não simplesmente usar
+/// python_dir() direto: run.py:15 também procura DLLs da NVIDIA em
+/// `<pasta do run.py>/venv/Lib/site-packages/nvidia/*/bin`. Sem essa
+/// pasta a busca simplesmente não encontra nada ali — mas run.py:14
+/// também varre `sys.prefix/Lib/site-packages`, que é onde os pacotes
+/// deste Python realmente vão parar. Então basta que o interpretador
+/// usado seja este aqui; nenhuma pasta venv/ precisa existir.
 pub fn venv_python() -> Result<PathBuf, String> {
-    Ok(venv_dir()?.join("Scripts").join("python.exe"))
+    Ok(python_dir()?.join("python.exe"))
 }
 
 pub fn app_dir() -> Result<PathBuf, String> {
