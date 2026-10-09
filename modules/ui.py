@@ -1102,6 +1102,10 @@ class MainWindow(QMainWindow):
         description_label.setObjectName("sectionDescription")
         layout.addWidget(heading)
         layout.addWidget(description_label)
+        # Quando o card fica mais alto que o conteúdo (aba ao vivo, ao lado do
+        # card de câmera), a folga vai para antes/depois da imagem — antes
+        # ela se espalhava entre o título e a descrição.
+        layout.addStretch(1)
 
         image_label = _make_image_drop(_(placeholder), (300, 250))
         image_label._placeholder_text = _(placeholder)
@@ -1109,6 +1113,7 @@ class MainWindow(QMainWindow):
         if source:
             self._source_labels.append(image_label)
         layout.addWidget(image_label, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addStretch(1)
 
         choose = QPushButton(_(button_text))
         choose.clicked.connect(self._on_select_source if source else self._on_select_target)
