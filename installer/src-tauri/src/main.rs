@@ -139,6 +139,29 @@ mod tests {
     }
 }
 
+/// Mensagem de falha para a tela. O erro técnico (saída do pip, códigos do
+/// Windows…) só faz sentido para suporte, então vai inteiro para o log e a
+/// tela diz em qual parte deu errado e onde ver os detalhes.
+fn friendly_failure(rep: &Reporter, step: Step, technical: &str) -> String {
+    rep.log(&format!("[{}] erro técnico: {technical}", step.label()));
+    let part = match step {
+        Step::Python => "configurar o ambiente",
+        Step::AppCode => "instalar os arquivos do aplicativo",
+        Step::Dependencies => "instalar os componentes",
+        Step::Models => "baixar os modelos de IA",
+        Step::VirtualCamera => "ativar a câmera virtual",
+    };
+    let network = ["timed out", "dns", "connection", "conex", "network", "rede", "HTTP"]
+        .iter()
+        .any(|k| technical.to_lowercase().contains(&k.to_lowercase()));
+    let hint = if network {
+        " Verifique a conexão com a internet e clique em Tentar de novo."
+    } else {
+        " Clique em Tentar de novo; o que já foi baixado é aproveitado."
+    };
+    format!("Não foi possível {part}.{hint} Detalhes em Ver log.")
+}
+
 #[tauri::command]
 async fn run_install(app: AppHandle) -> Result<InstallResult, String> {
     let rep = Reporter::new(app.clone());
@@ -167,8 +190,9 @@ async fn run_install(app: AppHandle) -> Result<InstallResult, String> {
 
     // 1. Python
     if let Err(e) = steps::ensure_python(&client, &rep).await {
-        rep.failed(Step::Python, &e);
-        return Err(e);
+        let msg = friendly_failure(&rep, Step::Python, &e);
+        rep.failed(Step::Python, &msg);
+        return Err(msg);
     }
 
     // 2. Código do app — antes das dependências, porque o venv mora dentro
@@ -188,20 +212,23 @@ async fn run_install(app: AppHandle) -> Result<InstallResult, String> {
         }
     };
     if let Err(e) = result {
-        rep.failed(Step::AppCode, &e);
-        return Err(e);
+        let msg = friendly_failure(&rep, Step::AppCode, &e);
+        rep.failed(Step::AppCode, &msg);
+        return Err(msg);
     }
 
     // 3. Dependências
     if let Err(e) = steps::ensure_dependencies(&client, &rep).await {
-        rep.failed(Step::Dependencies, &e);
-        return Err(e);
+        let msg = friendly_failure(&rep, Step::Dependencies, &e);
+        rep.failed(Step::Dependencies, &msg);
+        return Err(msg);
     }
 
     // 4. Modelos
     if let Err(e) = steps::ensure_models(&client, &rep).await {
-        rep.failed(Step::Models, &e);
-        return Err(e);
+        let msg = friendly_failure(&rep, Step::Models, &e);
+        rep.failed(Step::Models, &msg);
+        return Err(msg);
     }
 
     // 5. Câmera virtual — degradada em vez de fatal.

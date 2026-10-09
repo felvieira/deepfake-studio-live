@@ -75,7 +75,7 @@ pub async fn ensure_python(client: &reqwest::Client, rep: &Reporter) -> Result<(
     let dir = paths::python_dir()?;
     let exe = dir.join("python.exe");
     if exe.exists() {
-        rep.done(Step::Python, format!("Python {PYTHON_VERSION} já instalado"));
+        rep.done(Step::Python, "Ambiente já configurado");
         // Ainda assim reaplica os dois ajustes seguintes, mesmo já tendo
         // "terminado" este passo antes: cada um foi adicionado depois que
         // python.exe já podia existir de uma tentativa anterior, e sem
@@ -86,18 +86,19 @@ pub async fn ensure_python(client: &reqwest::Client, rep: &Reporter) -> Result<(
         return ensure_dev_headers(client, rep, &dir).await;
     }
 
-    rep.running(Step::Python, format!("Baixando Python {PYTHON_VERSION}…"));
+    rep.running(Step::Python, "Configurando o ambiente…");
+    rep.log(&format!("baixando Python {PYTHON_VERSION} embeddable"));
     let archive = paths::root()?.join("python-embed.zip");
     download_resumable(
         client,
         &DownloadSpec { url: PYTHON_URL, target: &archive, expected_size: None },
         |done, total| {
-            rep.progress(Step::Python, "Baixando Python…", done, total);
+            rep.progress(Step::Python, "Baixando os arquivos do ambiente…", done, total);
         },
     )
     .await?;
 
-    rep.running(Step::Python, "Extraindo…");
+    rep.running(Step::Python, "Preparando o ambiente…");
     unzip(&archive, &dir)?;
     let _ = std::fs::remove_file(&archive);
 
@@ -112,7 +113,7 @@ pub async fn ensure_python(client: &reqwest::Client, rep: &Reporter) -> Result<(
 
     ensure_dev_headers(client, rep, &dir).await?;
 
-    rep.done(Step::Python, format!("Python {PYTHON_VERSION} pronto"));
+    rep.done(Step::Python, "Ambiente configurado");
     Ok(())
 }
 
@@ -141,18 +142,18 @@ async fn ensure_dev_headers(
         return Ok(());
     }
 
-    rep.running(Step::Python, "Baixando cabeçalhos de desenvolvimento…");
+    rep.running(Step::Python, "Baixando arquivos complementares do ambiente…");
     let nuget = paths::root()?.join("python-dev.nupkg");
     download_resumable(
         client,
         &DownloadSpec { url: PYTHON_NUGET_URL, target: &nuget, expected_size: None },
         |done, total| {
-            rep.progress(Step::Python, "Baixando cabeçalhos…", done, total);
+            rep.progress(Step::Python, "Baixando arquivos complementares…", done, total);
         },
     )
     .await?;
 
-    rep.running(Step::Python, "Instalando cabeçalhos de desenvolvimento…");
+    rep.running(Step::Python, "Preparando arquivos complementares…");
     // O .nupkg é um zip comum; só interessam tools/include e tools/libs.
     unzip_subdirs(&nuget, python_dir, &[("tools/include", "include"), ("tools/libs", "libs")])?;
     let _ = std::fs::remove_file(&nuget);
@@ -193,7 +194,7 @@ async fn ensure_build_tools(client: &reqwest::Client, rep: &Reporter) -> Result<
 
     rep.running(
         Step::Dependencies,
-        "Baixando as ferramentas de compilação do Windows…",
+        "Baixando ferramentas do Windows necessárias…",
     );
     let installer = paths::root()?.join("vs_buildtools.exe");
     download_resumable(
@@ -205,7 +206,7 @@ async fn ensure_build_tools(client: &reqwest::Client, rep: &Reporter) -> Result<
 
     rep.running(
         Step::Dependencies,
-        "Instalando ferramentas de compilação (pede permissão; demora vários minutos)…",
+        "Instalando ferramentas do Windows (pode pedir permissão e levar alguns minutos)…",
     );
     // --passive: mostra progresso sem exigir clique; --wait: o instalador da
     // Microsoft normalmente se desacopla do processo pai e retorna na hora,
@@ -376,7 +377,7 @@ pub async fn ensure_dependencies(client: &reqwest::Client, rep: &Reporter) -> Re
     ensure_build_tools(client, rep).await?;
 
     if !has_pip {
-        rep.running(Step::Dependencies, "Preparando o instalador de pacotes…");
+        rep.running(Step::Dependencies, "Preparando a instalação dos componentes…");
         let get_pip = paths::root()?.join("get-pip.py");
         download_resumable(
             client,
@@ -403,7 +404,7 @@ pub async fn ensure_dependencies(client: &reqwest::Client, rep: &Reporter) -> Re
     // instalado — falha com "BackendUnavailable: Cannot import
     // 'setuptools.build_meta'". Isso não aparece com o Python do sistema
     // porque a maioria das instalações já traz setuptools de fábrica.
-    rep.running(Step::Dependencies, "Preparando ferramentas de build…");
+    rep.running(Step::Dependencies, "Preparando os componentes…");
     run_streamed(
         Command::new(&python).args([
             "-m", "pip", "install", "--progress-bar", "off", "setuptools", "wheel",
@@ -424,7 +425,7 @@ pub async fn ensure_dependencies(client: &reqwest::Client, rep: &Reporter) -> Re
     // pede; Cython não está listado lá — só é preciso para compilar, o
     // pacote final não depende dele em runtime — então vai sem pin.
     let numpy_spec = requirements_line(&requirements, "numpy")?.unwrap_or_else(|| "numpy".into());
-    rep.running(Step::Dependencies, "Preparando numpy e Cython…");
+    rep.running(Step::Dependencies, "Preparando os componentes…");
     run_streamed(
         &mut build_command(
             &python,
@@ -448,7 +449,7 @@ pub async fn ensure_dependencies(client: &reqwest::Client, rep: &Reporter) -> Re
     let requirements_str = requirements.to_string_lossy();
     rep.running(
         Step::Dependencies,
-        "Instalando dependências (demora vários minutos)…",
+        "Instalando os componentes (pode levar vários minutos)…",
     );
     run_streamed(
         &mut build_command(
@@ -465,7 +466,7 @@ pub async fn ensure_dependencies(client: &reqwest::Client, rep: &Reporter) -> Re
     if has_nvidia_gpu() {
         rep.running(
             Step::Dependencies,
-            "Instalando as bibliotecas CUDA da NVIDIA (~1,7 GB)…",
+            "Ativando a aceleração pela placa de vídeo (~1,7 GB)…",
         );
         let mut args = vec!["-m", "pip", "install", "--progress-bar", "off"];
         args.extend(CUDA_PACKAGES);
@@ -477,7 +478,7 @@ pub async fn ensure_dependencies(client: &reqwest::Client, rep: &Reporter) -> Re
         )?;
     }
 
-    rep.done(Step::Dependencies, "Dependências instaladas");
+    rep.done(Step::Dependencies, "Componentes instalados");
     Ok(())
 }
 
@@ -535,18 +536,18 @@ pub async fn fetch_app_code(client: &reqwest::Client, rep: &Reporter) -> Result<
         .ok_or_else(|| "a versão publicada não tem código para baixar".to_string())?
         .to_string();
 
-    rep.running(Step::AppCode, format!("Baixando {tag}…"));
+    rep.running(Step::AppCode, format!("Baixando o aplicativo ({tag})…"));
     let archive = paths::root()?.join("app-source.tar.gz");
     download_resumable(
         client,
         &DownloadSpec { url: &tarball, target: &archive, expected_size: None },
         |done, total| {
-            rep.progress(Step::AppCode, format!("Baixando {tag}…"), done, total);
+            rep.progress(Step::AppCode, format!("Baixando o aplicativo ({tag})…"), done, total);
         },
     )
     .await?;
 
-    rep.running(Step::AppCode, "Extraindo…");
+    rep.running(Step::AppCode, "Descompactando o aplicativo…");
     std::fs::create_dir_all(&dest)
         .map_err(|e| format!("não consegui criar {}: {e}", dest.display()))?;
     untar_strip_root(&archive, &dest)?;
@@ -571,7 +572,7 @@ pub fn ensure_app_code(rep: &Reporter, source: &Path) -> Result<(), String> {
         return Err(format!("código-fonte não encontrado em {}", source.display()));
     }
 
-    rep.running(Step::AppCode, "Copiando o aplicativo…");
+    rep.running(Step::AppCode, "Copiando os arquivos do aplicativo…");
     std::fs::create_dir_all(&dest)
         .map_err(|e| format!("não consegui criar {}: {e}", dest.display()))?;
 
@@ -591,11 +592,15 @@ pub async fn ensure_models(client: &reqwest::Client, rep: &Reporter) -> Result<(
     let total = models::total_bytes();
     let mut completed: u64 = 0;
 
-    for model in models::MODELS {
+    let count = models::MODELS.len();
+    for (index, model) in models::MODELS.iter().enumerate() {
         let relative = model.name.replace('/', std::path::MAIN_SEPARATOR_STR);
         let target = models_dir.join(&relative);
         let url = format!("{HF_BASE}{}", model.name);
-        let short = model.name.rsplit('/').next().unwrap_or(model.name).to_string();
+        // A tela mostra "modelo 3 de 9", não o nome do arquivo: quem instala
+        // não precisa saber quais modelos são. O nome vai para o log.
+        let label = format!("Baixando modelo {} de {count}…", index + 1);
+        rep.log(&format!("modelo {}/{count}: {}", index + 1, model.name));
 
         let base = completed;
         download_resumable(
@@ -604,7 +609,7 @@ pub async fn ensure_models(client: &reqwest::Client, rep: &Reporter) -> Result<(
             |done, _| {
                 rep.progress(
                     Step::Models,
-                    format!("Baixando {short}…"),
+                    label.clone(),
                     base + done,
                     total,
                 );
@@ -634,12 +639,12 @@ pub fn ensure_virtual_camera(rep: &Reporter) -> Result<(), String> {
     if !script.exists() {
         rep.degraded(
             Step::VirtualCamera,
-            "Script do driver não encontrado; o app funciona sem a câmera virtual",
+            "Câmera virtual indisponível nesta instalação; o app funciona normalmente sem ela",
         );
         return Ok(());
     }
 
-    rep.running(Step::VirtualCamera, "Registrando a câmera virtual (pede permissão)…");
+    rep.running(Step::VirtualCamera, "Ativando a câmera virtual (o Windows pode pedir permissão)…");
 
     // Um .bat precisa do cmd, mas o caminho vai depois de /D para desligar
     // o AutoRun do registro, e como argumento próprio — não concatenado numa
@@ -660,20 +665,19 @@ pub fn ensure_virtual_camera(rep: &Reporter) -> Result<(), String> {
         }
         Ok(output) => {
             let detail = String::from_utf8_lossy(&output.stderr);
+            rep.log(&format!("câmera virtual: falha ao registrar o driver: {}", detail.trim()));
             rep.degraded(
                 Step::VirtualCamera,
-                format!(
-                    "Não foi possível registrar o driver ({}). O app funciona, \
-                     mas sem saída para Zoom/Discord. Rode install_virtual_camera.bat \
-                     como administrador depois.",
-                    detail.trim().chars().take(120).collect::<String>()
-                ),
+                "Não foi possível ativar a câmera virtual. O app funciona normalmente, \
+                 mas sem enviar vídeo para Zoom, Discord ou Teams. Para tentar de novo, \
+                 abra o instalador e clique em Instalar.",
             );
         }
         Err(e) => {
+            rep.log(&format!("câmera virtual: não executou o script do driver: {e}"));
             rep.degraded(
                 Step::VirtualCamera,
-                format!("Não foi possível executar o instalador do driver: {e}"),
+                "Não foi possível ativar a câmera virtual. O app funciona normalmente sem ela.",
             );
         }
     }
@@ -743,6 +747,8 @@ fn run_streamed(
         for raw in BufReader::new(out).split(b'\n').flatten() {
             let line = String::from_utf8_lossy(&raw).trim_end_matches('\r').to_string();
             if let Some(msg) = friendly_pip_line(&line) {
+                // A linha original (com nomes de pacotes) fica só no log.
+                rep.log(&format!("[pip] {}", line.trim()));
                 rep.detail(step, msg);
             }
             stdout_text.push_str(&line);
@@ -767,16 +773,14 @@ fn run_streamed(
     Err(format!("falha ao {what}:\n{tail}"))
 }
 
-/// Traduz uma linha da saída do pip numa frase curta para a tela. `None`
-/// para as que não dizem nada de útil (metadados, "Preparing metadata"…).
+/// Traduz uma linha da saída do pip numa frase curta para a tela, sem nomes
+/// de pacotes nem termos técnicos: quem instala vê o que está acontecendo
+/// (verificando, baixando, otimizando), não com quais tecnologias. `None`
+/// para as linhas que não dizem nada de útil (metadados, cache).
 fn friendly_pip_line(line: &str) -> Option<String> {
     let l = line.trim();
-    if let Some(rest) = l.strip_prefix("Collecting ") {
-        let name = rest
-            .split(|c: char| "<>=!~; [(".contains(c))
-            .next()
-            .unwrap_or(rest);
-        return Some(format!("Resolvendo {name}…"));
+    if l.starts_with("Collecting ") {
+        return Some("Verificando os componentes…".to_string());
     }
     if let Some(rest) = l.strip_prefix("Downloading ") {
         let (file, size) = match rest.rfind(" (") {
@@ -786,30 +790,23 @@ fn friendly_pip_line(line: &str) -> Option<String> {
         if file.ends_with(".metadata") {
             return None;
         }
-        let name = file.split('-').next().unwrap_or(file);
         return Some(if size.is_empty() {
-            format!("Baixando {name}…")
+            "Baixando componente…".to_string()
         } else {
-            format!("Baixando {name} ({size})…")
+            format!("Baixando componente ({size})…")
         });
     }
-    if let Some(rest) = l.strip_prefix("Using cached ") {
-        if rest.contains(".metadata") {
-            return None;
-        }
-        let name = rest.split('-').next().unwrap_or(rest);
-        return Some(format!("Usando {name} do cache…"));
-    }
-    if let Some(rest) = l.strip_prefix("Building wheel for ") {
-        let name = rest.split_whitespace().next().unwrap_or(rest);
-        return Some(format!("Compilando {name} (pode levar vários minutos)…"));
+    if l.starts_with("Building wheel for ") {
+        return Some(
+            "Otimizando componentes para o seu computador (pode levar vários minutos)…".to_string(),
+        );
     }
     if let Some(rest) = l.strip_prefix("Installing collected packages:") {
         let n = rest.split(',').filter(|p| !p.trim().is_empty()).count();
-        return Some(format!("Instalando {n} pacotes…"));
+        return Some(format!("Instalando {n} componentes…"));
     }
     if l.starts_with("Successfully installed") {
-        return Some("Pacotes instalados".to_string());
+        return Some("Componentes instalados".to_string());
     }
     None
 }
@@ -1201,19 +1198,19 @@ mod pip_line_tests {
     fn translates_the_lines_that_matter() {
         assert_eq!(
             friendly_pip_line("Collecting onnxruntime-gpu==1.26.0").as_deref(),
-            Some("Resolvendo onnxruntime-gpu…")
+            Some("Verificando os componentes…")
         );
         assert_eq!(
             friendly_pip_line("  Downloading onnxruntime_gpu-1.26.0-cp312-cp312-win_amd64.whl (207.3 MB)").as_deref(),
-            Some("Baixando onnxruntime_gpu (207.3 MB)…")
+            Some("Baixando componente (207.3 MB)…")
         );
         assert_eq!(
             friendly_pip_line("  Building wheel for insightface (pyproject.toml): started").as_deref(),
-            Some("Compilando insightface (pode levar vários minutos)…")
+            Some("Otimizando componentes para o seu computador (pode levar vários minutos)…")
         );
         assert_eq!(
             friendly_pip_line("Installing collected packages: a, b, c").as_deref(),
-            Some("Instalando 3 pacotes…")
+            Some("Instalando 3 componentes…")
         );
     }
 
@@ -1221,6 +1218,7 @@ mod pip_line_tests {
     fn ignores_noise_and_metadata() {
         assert_eq!(friendly_pip_line("  Downloading foo-1.0-py3-none-any.whl.metadata (6.8 kB)"), None);
         assert_eq!(friendly_pip_line("  Using cached foo-1.0.whl.metadata (5 kB)"), None);
+        assert_eq!(friendly_pip_line("  Using cached foo-1.0-py3-none-any.whl (12 kB)"), None);
         assert_eq!(friendly_pip_line("  Preparing metadata (pyproject.toml): finished with status 'done'"), None);
         assert_eq!(friendly_pip_line(""), None);
     }

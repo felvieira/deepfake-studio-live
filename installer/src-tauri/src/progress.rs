@@ -94,11 +94,10 @@ impl Reporter {
     }
 
     /// Uma linha de detalhe do que está acontecendo AGORA dentro de uma
-    /// etapa longa (ex.: cada pacote que o pip baixa). Vai inteira para o
-    /// log; para a tela, no máximo ~8 por segundo.
+    /// etapa longa (ex.: o pip baixando). Só para a tela, no máximo ~8 por
+    /// segundo — quem chama grava no log a versão técnica da mesma linha.
     pub fn detail(&self, step: Step, message: impl Into<String>) {
         let message = message.into();
-        self.log(&format!("[{}] {}", step.label(), message));
         let mut t = self.throttle.lock().unwrap();
         if t.last_emit.elapsed() < Duration::from_millis(120) {
             return;

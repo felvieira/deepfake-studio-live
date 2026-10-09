@@ -207,7 +207,7 @@
       <li data-step="python" data-state="pending">
         <div class="marker"></div>
         <div>
-          <div class="row-top"><span class="label">Python</span><span class="pct"></span></div>
+          <div class="row-top"><span class="label">Ambiente</span><span class="pct"></span></div>
           <div class="msg"></div>
           <div class="bar"><span></span></div>
           <div class="size"></div>
@@ -225,7 +225,7 @@
       <li data-step="dependencies" data-state="pending">
         <div class="marker"></div>
         <div>
-          <div class="row-top"><span class="label">Dependências</span><span class="pct"></span></div>
+          <div class="row-top"><span class="label">Componentes</span><span class="pct"></span></div>
           <div class="msg"></div>
           <div class="bar"><span></span></div>
           <div class="size"></div>
@@ -269,9 +269,9 @@ const { listen } = window.__TAURI__.event;
 
 const STEP_ORDER = ["python", "app-code", "dependencies", "models", "virtual-camera"];
 const STEP_NAMES = {
-  "python": "Python",
+  "python": "Ambiente",
   "app-code": "Aplicativo",
-  "dependencies": "Dependências",
+  "dependencies": "Componentes",
   "models": "Modelos de IA",
   "virtual-camera": "Câmera virtual",
 };
@@ -474,10 +474,13 @@ go.addEventListener("click", async () => {
     const where = shortcuts.length
       ? ' Use o atalho "Deepfake Studio Live" na Área de Trabalho ou no Menu Iniciar.'
       : "";
+    // Sem nomes técnicos (CUDA, DirectML): só se a placa de vídeo será usada.
     if (accelerator === "CPU") {
-      setStatus(`Instalado em ${total}, mas rodando em CPU — a GPU não foi detectada.${where}`, "");
+      setStatus(`Instalado em ${total}. Vai rodar no processador — nenhuma placa de vídeo compatível foi encontrada.${where}`, "");
+    } else if (accelerator === "CUDA" || accelerator === "DirectML") {
+      setStatus(`Instalado em ${total}, com aceleração pela placa de vídeo.${where}`, "ok");
     } else {
-      setStatus(`Instalado em ${total} — acelerador: ${accelerator}.${where}`, "ok");
+      setStatus(`Instalado em ${total}.${where}`, "ok");
     }
   } catch (e) {
     installStartedAt = null;
