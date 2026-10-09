@@ -7,6 +7,8 @@
 use serde::Serialize;
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 /// Em qual dos cinco passos estamos. O frontend usa isto para marcar a lista.
@@ -59,11 +61,57 @@ pub struct StepUpdate {
 #[derive(Clone)]
 pub struct Reporter {
     app: AppHandle,
+    throttle: Arc<Mutex<Throttle>>,
+}
+
+/// Estado do limitador de eventos. Um download de 300 MB entrega milhares de
+/// chunks; emitir e gravar uma linha de log por chunk deixava o install.log
+/// com centenas de milhares de caracteres de "Baixando…" repetido e
+/// inundava o frontend. Aqui só passa o que muda de forma visível.
+struct Throttle {
+    last_emit: Instant,
+    last_decile: i32,
+    last_step: Option<Step>,
 }
 
 impl Reporter {
     pub fn new(app: AppHandle) -> Self {
-        Self { app }
+        Self {
+            app,
+            throttle: Arc::new(Mutex::new(Throttle {
+                last_emit: Instant::now() - Duration::from_secs(1),
+                last_decile: -1,
+                last_step: None,
+            })),
+        }
+    }
+
+    /// Emite sem gravar no log (o chamador decide o que merece uma linha).
+    fn emit(&self, update: &StepUpdate) {
+        // Um erro de emit significa que a janela sumiu; a instalação
+        // continua e o log guarda o resto.
+        let _ = self.app.emit("install:step", update);
+    }
+
+    /// Uma linha de detalhe do que está acontecendo AGORA dentro de uma
+    /// etapa longa (ex.: cada pacote que o pip baixa). Vai inteira para o
+    /// log; para a tela, no máximo ~8 por segundo.
+    pub fn detail(&self, step: Step, message: impl Into<String>) {
+        let message = message.into();
+        self.log(&format!("[{}] {}", step.label(), message));
+        let mut t = self.throttle.lock().unwrap();
+        if t.last_emit.elapsed() < Duration::from_millis(120) {
+            return;
+        }
+        t.last_emit = Instant::now();
+        drop(t);
+        self.emit(&StepUpdate {
+            step,
+            state: StepState::Running,
+            message,
+            fraction: None,
+            bytes: None,
+        });
     }
 
     pub fn update(&self, update: StepUpdate) {
@@ -73,9 +121,12 @@ impl Reporter {
             update.state,
             update.message
         ));
-        // Um erro de emit significa que a janela sumiu; a instalação
-        // continua e o log guarda o resto.
-        let _ = self.app.emit("install:step", &update);
+        self.emit(&update);
+        // Uma mudança de estado/etapa zera o limitador de progresso.
+        if let Ok(mut t) = self.throttle.lock() {
+            t.last_decile = -1;
+            t.last_step = Some(update.step);
+        }
     }
 
     pub fn running(&self, step: Step, message: impl Into<String>) {
@@ -94,13 +145,41 @@ impl Reporter {
         } else {
             None
         };
-        self.update(StepUpdate {
-            step,
-            state: StepState::Running,
-            message: message.into(),
-            fraction,
-            bytes: Some((done, total)),
-        });
+        let message = message.into();
+        let decile = fraction.map(|f| (f * 10.0) as i32).unwrap_or(-1);
+
+        let mut t = self.throttle.lock().unwrap();
+        let finished = total > 0 && done >= total;
+        let step_changed = t.last_step != Some(step);
+        let decile_changed = decile != t.last_decile;
+        // A tela recebe no máximo ~7 atualizações por segundo, mas nunca
+        // perde a primeira, a última nem a troca de etapa.
+        let emit_now =
+            finished || step_changed || t.last_emit.elapsed() >= Duration::from_millis(150);
+        if decile_changed || step_changed {
+            // O log só ganha uma linha a cada 10%.
+            self.log(&format!(
+                "[{}] {} ({}%)",
+                step.label(),
+                message,
+                (fraction.unwrap_or(0.0) * 100.0) as i32
+            ));
+        }
+        t.last_decile = decile;
+        t.last_step = Some(step);
+        if emit_now {
+            t.last_emit = Instant::now();
+        }
+        drop(t);
+        if emit_now {
+            self.emit(&StepUpdate {
+                step,
+                state: StepState::Running,
+                message,
+                fraction,
+                bytes: Some((done, total)),
+            });
+        }
     }
 
     pub fn done(&self, step: Step, message: impl Into<String>) {

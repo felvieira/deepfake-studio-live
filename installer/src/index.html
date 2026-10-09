@@ -115,6 +115,8 @@
     min-height: 15px;
   }
   li[data-state="pending"] .msg { color: var(--muted-dim); }
+  li[data-state="running"] .msg { color: var(--text); font-size: 12.5px; }
+  li[data-state="running"] .size { color: var(--muted); }
 
   .bar {
     height: 5px;
@@ -266,6 +268,18 @@ const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
 const STEP_ORDER = ["python", "app-code", "dependencies", "models", "virtual-camera"];
+const STEP_NAMES = {
+  "python": "Python",
+  "app-code": "Aplicativo",
+  "dependencies": "Dependências",
+  "models": "Modelos de IA",
+  "virtual-camera": "Câmera virtual",
+};
+// Peso de cada etapa no tempo total, para a barra geral andar de forma
+// proporcional ao que realmente demora (dependências e modelos são quase
+// tudo; Python e câmera virtual duram segundos).
+const WEIGHTS = { "python": 5, "app-code": 5, "dependencies": 45, "models": 40, "virtual-camera": 5 };
+const WEIGHT_SUM = Object.values(WEIGHTS).reduce((a, b) => a + b, 0);
 
 const steps = document.getElementById("steps");
 const go = document.getElementById("go");
@@ -278,39 +292,105 @@ const overallCount = document.getElementById("overallCount");
 const gb = (n) => (n / 1e9).toFixed(1) + " GB";
 const mb = (n) => (n / 1e6).toFixed(0) + " MB";
 
+function fmtTime(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  if (m >= 60) return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}min`;
+  return m > 0 ? `${m}min ${String(r).padStart(2, "0")}s` : `${r}s`;
+}
+
 function setStatus(text, kind = "") {
   status.textContent = text;
   status.className = "status " + kind;
 }
 
-function updateOverallProgress() {
-  const done = STEP_ORDER.filter((s) => {
-    const li = steps.querySelector(`[data-step="${s}"]`);
-    return li && (li.dataset.state === "done" || li.dataset.state === "degraded");
-  }).length;
-  overallBar.style.width = `${(done / STEP_ORDER.length) * 100}%`;
-  overallCount.textContent = `${done}/${STEP_ORDER.length}`;
+// Estado por etapa: quando começou, última amostra de bytes e velocidade
+// suavizada (média móvel), usados para mostrar MB/s e quanto falta.
+const info = {};
+for (const k of STEP_ORDER) info[k] = { state: "pending", started: null, ended: null, fraction: null, bytes: null, sample: null, speed: 0 };
+let installStartedAt = null;
+
+function renderMeta(key) {
+  const i = info[key];
+  const li = steps.querySelector(`[data-step="${key}"]`);
+  const size = li.querySelector(".size");
+  const parts = [];
+  if (i.bytes) {
+    parts.push(`${mb(i.bytes[0])} / ${mb(i.bytes[1])}`);
+    if (i.state === "running" && i.speed > 50_000) {
+      parts.push(`${(i.speed / 1e6).toFixed(1)} MB/s`);
+      const left = (i.bytes[1] - i.bytes[0]) / i.speed;
+      if (isFinite(left) && left >= 0) parts.push(`faltam ~${fmtTime(left * 1000)}`);
+    }
+  }
+  if (i.started) {
+    const end = i.ended ?? Date.now();
+    parts.push(i.state === "running" ? `há ${fmtTime(end - i.started)}` : `levou ${fmtTime(end - i.started)}`);
+  }
+  size.textContent = parts.join("  ·  ");
 }
 
-listen("install:step", (event) => {
-  const u = event.payload;
-  const li = steps.querySelector(`[data-step="${u.step}"]`);
-  if (!li) return;
+function overallFraction() {
+  let acc = 0;
+  for (const k of STEP_ORDER) {
+    const i = info[k];
+    if (i.state === "done" || i.state === "degraded") acc += WEIGHTS[k];
+    else if (i.state === "running" && i.fraction != null) acc += WEIGHTS[k] * i.fraction;
+  }
+  return acc / WEIGHT_SUM;
+}
+
+function renderOverall() {
+  const f = overallFraction();
+  overallBar.style.width = `${f * 100}%`;
+  overallCount.textContent = `${Math.round(f * 100)}%`;
+
+  const running = STEP_ORDER.find((k) => info[k].state === "running");
+  if (running && installStartedAt) {
+    const n = STEP_ORDER.indexOf(running) + 1;
+    setStatus(`Etapa ${n} de ${STEP_ORDER.length} — ${STEP_NAMES[running]}  ·  ${fmtTime(Date.now() - installStartedAt)} no total`);
+  }
+}
+
+function applyUpdate(u) {
+  const key = u.step;
+  const li = steps.querySelector(`[data-step="${key}"]`);
+  if (!li || !info[key]) return;
+  const i = info[key];
+
+  if (u.state === "running" && !i.started) i.started = Date.now();
+  if (u.state !== "running" && u.state !== "pending" && !i.ended) i.ended = Date.now();
+  if (u.state === "running") i.ended = null;
+  i.state = u.state;
+  i.fraction = u.fraction;
+
+  if (u.bytes) {
+    const now = Date.now();
+    if (i.sample && now - i.sample.t >= 400) {
+      const inst = ((u.bytes[0] - i.sample.b) / (now - i.sample.t)) * 1000;
+      if (inst >= 0) i.speed = i.speed ? i.speed * 0.7 + inst * 0.3 : inst;
+      i.sample = { t: now, b: u.bytes[0] };
+    } else if (!i.sample) {
+      i.sample = { t: now, b: u.bytes[0] };
+    }
+    i.bytes = u.bytes;
+  } else if (u.state !== "running") {
+    i.speed = 0;
+  }
+
   li.dataset.state = u.state;
   li.querySelector(".msg").textContent = u.message || "";
 
   const bar = li.querySelector(".bar");
   const barFill = bar.querySelector("span");
   const pct = li.querySelector(".pct");
-
   if (u.state === "running") {
     if (u.fraction != null) {
       bar.classList.remove("indeterminate");
       barFill.style.width = `${u.fraction * 100}%`;
       pct.textContent = `${Math.round(u.fraction * 100)}%`;
     } else {
-      // Passo em andamento sem fração conhecida (ex.: pip resolvendo
-      // pacotes) — listra animada em vez de uma barra parada em 0%.
       bar.classList.add("indeterminate");
       pct.textContent = "";
     }
@@ -324,24 +404,36 @@ listen("install:step", (event) => {
     pct.textContent = "";
   }
 
-  const size = li.querySelector(".size");
-  size.textContent = u.bytes ? `${mb(u.bytes[0])} / ${mb(u.bytes[1])}` : "";
+  renderMeta(key);
+  renderOverall();
+}
 
-  updateOverallProgress();
+// Sem a permissão core:event em capabilities/default.json, o listen() é
+// recusado em silêncio e a tela nunca sai de 0/5 mesmo com a instalação
+// andando por baixo. Se isso voltar a acontecer, que apareça na tela.
+listen("install:step", (event) => applyUpdate(event.payload)).catch((e) => {
+  setStatus("Sem canal de progresso com o instalador: " + e, "error");
 });
 
-const info = await invoke("install_info").catch((e) => {
+// Relógio: atualiza "há 2min 13s" e o total mesmo quando nenhum evento chega
+// (ex.: o pip compilando por minutos) — é o que mostra que não travou.
+setInterval(() => {
+  for (const k of STEP_ORDER) if (info[k].state === "running") renderMeta(k);
+  if (installStartedAt) renderOverall();
+}, 500);
+
+const initial = await invoke("install_info").catch((e) => {
   setStatus(String(e), "error");
   return null;
 });
 
-if (info) {
-  if (info.installed) {
+if (initial) {
+  if (initial.installed) {
     go.textContent = "Abrir";
-    setStatus("Já instalado em " + info.root);
+    setStatus("Já instalado em " + initial.root);
   } else {
-    const free = info.free_bytes != null ? `, ${gb(info.free_bytes)} livres` : "";
-    setStatus(`Precisa de ${gb(info.required_bytes)}${free}`);
+    const free = initial.free_bytes != null ? `, ${gb(initial.free_bytes)} livres` : "";
+    setStatus(`Precisa de ${gb(initial.required_bytes)}${free}`);
   }
 }
 
@@ -362,18 +454,25 @@ go.addEventListener("click", async () => {
   go.disabled = true;
   logBtn.hidden = false;
   overall.hidden = false;
-  updateOverallProgress();
-  setStatus("Instalando… pode levar vários minutos");
+  installStartedAt = Date.now();
+  for (const k of STEP_ORDER) Object.assign(info[k], { started: null, ended: null, speed: 0, sample: null });
+  renderOverall();
+  setStatus("Iniciando a instalação…");
   try {
     const accelerator = await invoke("run_install");
+    installStartedAt = null;
     go.disabled = false;
     go.textContent = "Abrir";
+    const total = fmtTime(Date.now() - (info["python"].started ?? Date.now()));
+    overallBar.style.width = "100%";
+    overallCount.textContent = "100%";
     if (accelerator === "CPU") {
-      setStatus("Instalado, mas rodando em CPU — a GPU não foi detectada", "");
+      setStatus(`Instalado em ${total}, mas rodando em CPU — a GPU não foi detectada`, "");
     } else {
-      setStatus(`Instalado — acelerador: ${accelerator}`, "ok");
+      setStatus(`Instalado em ${total} — acelerador: ${accelerator}`, "ok");
     }
   } catch (e) {
+    installStartedAt = null;
     go.disabled = false;
     go.textContent = "Tentar de novo";
     setStatus(String(e), "error");

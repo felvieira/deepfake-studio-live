@@ -9,7 +9,8 @@ use crate::models::{self, HF_BASE};
 use crate::paths;
 use crate::progress::{Reporter, Step};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::io::{BufRead, BufReader, Read};
+use std::process::{Command, Stdio};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -367,9 +368,13 @@ pub async fn ensure_dependencies(client: &reqwest::Client, rep: &Reporter) -> Re
     // 'setuptools.build_meta'". Isso não aparece com o Python do sistema
     // porque a maioria das instalações já traz setuptools de fábrica.
     rep.running(Step::Dependencies, "Preparando ferramentas de build…");
-    run_checked(
-        Command::new(&python).args(["-m", "pip", "install", "setuptools", "wheel"]),
+    run_streamed(
+        Command::new(&python).args([
+            "-m", "pip", "install", "--progress-bar", "off", "setuptools", "wheel",
+        ]),
         "instalar setuptools/wheel",
+        rep,
+        Step::Dependencies,
     )?;
 
     // insightface compila extensões Cython/C e seu setup.py importa numpy e
@@ -384,9 +389,14 @@ pub async fn ensure_dependencies(client: &reqwest::Client, rep: &Reporter) -> Re
     // pacote final não depende dele em runtime — então vai sem pin.
     let numpy_spec = requirements_line(&requirements, "numpy")?.unwrap_or_else(|| "numpy".into());
     rep.running(Step::Dependencies, "Preparando numpy e Cython…");
-    run_checked(
-        &mut build_command(&python, &["-m", "pip", "install", &numpy_spec, "Cython"]),
+    run_streamed(
+        &mut build_command(
+            &python,
+            &["-m", "pip", "install", "--progress-bar", "off", &numpy_spec, "Cython"],
+        ),
         "instalar numpy/Cython",
+        rep,
+        Step::Dependencies,
     )?;
 
     // Este é o passo longo: onnxruntime-gpu e as libs da NVIDIA passam de
@@ -404,10 +414,14 @@ pub async fn ensure_dependencies(client: &reqwest::Client, rep: &Reporter) -> Re
         Step::Dependencies,
         "Instalando dependências (demora vários minutos)…",
     );
-    run_checked_logged(
-        &mut build_command(&python, &["-m", "pip", "install", "-r", &requirements_str]),
+    run_streamed(
+        &mut build_command(
+            &python,
+            &["-m", "pip", "install", "--progress-bar", "off", "-r", &requirements_str],
+        ),
         "instalar as dependências",
-        Some(rep),
+        rep,
+        Step::Dependencies,
     )?;
 
     rep.done(Step::Dependencies, "Dependências instaladas");
@@ -636,6 +650,115 @@ fn requirements_line(requirements: &Path, pkg: &str) -> Result<Option<String>, S
         }
     }
     Ok(None)
+}
+
+/// Roda um comando longo mostrando, ao vivo, o que ele está fazendo.
+///
+/// `pip install -r requirements.txt` leva vários minutos e antes não
+/// emitia nada até terminar: a tela ficava parada na mesma frase e quem
+/// instalava não tinha como saber se estava trabalhando ou travado. Aqui a
+/// saída é lida linha a linha e as linhas que dizem algo útil viram uma
+/// mensagem curta ("Baixando onnxruntime_gpu (207 MB)…") enviada à tela.
+///
+/// O stderr é lido numa thread à parte: se ninguém o esvaziar, um pipe cheio
+/// bloqueia o processo filho e a instalação trava de verdade.
+fn run_streamed(
+    command: &mut Command,
+    what: &str,
+    rep: &Reporter,
+    step: Step,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("falha ao {what}: {e}"))?;
+
+    let stderr = child.stderr.take();
+    let err_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut e) = stderr {
+            let _ = e.read_to_end(&mut buf);
+        }
+        String::from_utf8_lossy(&buf).into_owned()
+    });
+
+    let mut stdout_text = String::new();
+    if let Some(out) = child.stdout.take() {
+        for raw in BufReader::new(out).split(b'\n').flatten() {
+            let line = String::from_utf8_lossy(&raw).trim_end_matches('\r').to_string();
+            if let Some(msg) = friendly_pip_line(&line) {
+                rep.detail(step, msg);
+            }
+            stdout_text.push_str(&line);
+            stdout_text.push('\n');
+        }
+    }
+
+    let status = child
+        .wait()
+        .map_err(|e| format!("falha ao {what}: {e}"))?;
+    let stderr_text = err_thread.join().unwrap_or_default();
+
+    if status.success() {
+        return Ok(());
+    }
+
+    rep.log(&format!(
+        "--- falha ao {what}: saída completa ---\n[stdout]\n{stdout_text}\n[stderr]\n{stderr_text}\n--- fim ---"
+    ));
+    let tail: Vec<&str> = stderr_text.lines().rev().take(25).collect();
+    let tail = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
+    Err(format!("falha ao {what}:\n{tail}"))
+}
+
+/// Traduz uma linha da saída do pip numa frase curta para a tela. `None`
+/// para as que não dizem nada de útil (metadados, "Preparing metadata"…).
+fn friendly_pip_line(line: &str) -> Option<String> {
+    let l = line.trim();
+    if let Some(rest) = l.strip_prefix("Collecting ") {
+        let name = rest
+            .split(|c: char| "<>=!~; [(".contains(c))
+            .next()
+            .unwrap_or(rest);
+        return Some(format!("Resolvendo {name}…"));
+    }
+    if let Some(rest) = l.strip_prefix("Downloading ") {
+        let (file, size) = match rest.rfind(" (") {
+            Some(i) => (&rest[..i], rest[i + 2..].trim_end_matches(')')),
+            None => (rest, ""),
+        };
+        if file.ends_with(".metadata") {
+            return None;
+        }
+        let name = file.split('-').next().unwrap_or(file);
+        return Some(if size.is_empty() {
+            format!("Baixando {name}…")
+        } else {
+            format!("Baixando {name} ({size})…")
+        });
+    }
+    if let Some(rest) = l.strip_prefix("Using cached ") {
+        if rest.contains(".metadata") {
+            return None;
+        }
+        let name = rest.split('-').next().unwrap_or(rest);
+        return Some(format!("Usando {name} do cache…"));
+    }
+    if let Some(rest) = l.strip_prefix("Building wheel for ") {
+        let name = rest.split_whitespace().next().unwrap_or(rest);
+        return Some(format!("Compilando {name} (pode levar vários minutos)…"));
+    }
+    if let Some(rest) = l.strip_prefix("Installing collected packages:") {
+        let n = rest.split(',').filter(|p| !p.trim().is_empty()).count();
+        return Some(format!("Instalando {n} pacotes…"));
+    }
+    if l.starts_with("Successfully installed") {
+        return Some("Pacotes instalados".to_string());
+    }
+    None
 }
 
 fn run_checked(command: &mut Command, what: &str) -> Result<(), String> {
@@ -1014,5 +1137,38 @@ import site
         let n = text.lines().filter(|l| l.trim() == app.to_string_lossy()).count();
         assert_eq!(n, 1, "{text}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod pip_line_tests {
+    use super::friendly_pip_line;
+
+    #[test]
+    fn translates_the_lines_that_matter() {
+        assert_eq!(
+            friendly_pip_line("Collecting onnxruntime-gpu==1.26.0").as_deref(),
+            Some("Resolvendo onnxruntime-gpu…")
+        );
+        assert_eq!(
+            friendly_pip_line("  Downloading onnxruntime_gpu-1.26.0-cp312-cp312-win_amd64.whl (207.3 MB)").as_deref(),
+            Some("Baixando onnxruntime_gpu (207.3 MB)…")
+        );
+        assert_eq!(
+            friendly_pip_line("  Building wheel for insightface (pyproject.toml): started").as_deref(),
+            Some("Compilando insightface (pode levar vários minutos)…")
+        );
+        assert_eq!(
+            friendly_pip_line("Installing collected packages: a, b, c").as_deref(),
+            Some("Instalando 3 pacotes…")
+        );
+    }
+
+    #[test]
+    fn ignores_noise_and_metadata() {
+        assert_eq!(friendly_pip_line("  Downloading foo-1.0-py3-none-any.whl.metadata (6.8 kB)"), None);
+        assert_eq!(friendly_pip_line("  Using cached foo-1.0.whl.metadata (5 kB)"), None);
+        assert_eq!(friendly_pip_line("  Preparing metadata (pyproject.toml): finished with status 'done'"), None);
+        assert_eq!(friendly_pip_line(""), None);
     }
 }
