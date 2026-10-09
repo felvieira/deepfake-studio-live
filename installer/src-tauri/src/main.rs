@@ -56,9 +56,12 @@ fn install_info() -> Result<InstallInfo, String> {
     // Os modelos também contam: sem eles o app abre e trava no primeiro
     // "Start live", e uma instalação interrompida no passo de modelos
     // aparecia como concluída.
+    // Com placa NVIDIA, as bibliotecas CUDA também contam: sem elas o app
+    // abre e roda 17x mais devagar, em CPU, sem nenhum erro à vista.
     let installed = deps_marker.exists()
         && paths::app_dir()?.join("run.py").exists()
-        && models::all_present(&paths::models_dir()?);
+        && models::all_present(&paths::models_dir()?)
+        && (!steps::has_nvidia_gpu() || steps::cuda_libs_installed());
     Ok(InstallInfo {
         installed,
         root: root.to_string_lossy().to_string(),

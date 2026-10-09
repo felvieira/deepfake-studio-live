@@ -161,7 +161,19 @@ for sp in (os.path.join(sys.prefix, "Lib", "site-packages"), os.path.join(root, 
             pass
 try:
     import onnxruntime
-    print(json.dumps(onnxruntime.get_available_providers()))
+    providers = onnxruntime.get_available_providers()
+    # get_available_providers() só lista o que o pacote traz, não o que
+    # carrega: com cuBLAS/cuDNN ausentes o CUDA aparece na lista e falha na
+    # primeira sessão, e o app roda em CPU. Carregar a DLL do provider
+    # reproduz essa falha aqui, em vez de descobri-la pela lentidão.
+    if "CUDAExecutionProvider" in providers:
+        import ctypes
+        capi = os.path.join(os.path.dirname(onnxruntime.__file__), "capi")
+        try:
+            ctypes.WinDLL(os.path.join(capi, "onnxruntime_providers_cuda.dll"))
+        except OSError:
+            providers = [p for p in providers if p != "CUDAExecutionProvider"]
+    print(json.dumps(providers))
 except Exception as exc:
     print(json.dumps({"error": str(exc)}))
 "#;

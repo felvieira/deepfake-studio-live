@@ -31,7 +31,43 @@ const PYTHON_URL: &str =
 /// descobrir que falta espaço com 900 MB já baixados é a pior hora de
 /// descobrir.
 pub fn required_bytes() -> u64 {
-    models::total_bytes() + 6 * 1024 * 1024 * 1024
+    // 8 GB além dos modelos: ~6 GB de Python + dependências + build, e mais
+    // ~2 GB das bibliotecas CUDA quando há placa NVIDIA.
+    models::total_bytes() + 8 * 1024 * 1024 * 1024
+}
+
+/// Há um driver NVIDIA instalado? `nvcuda.dll` é o que o driver coloca em
+/// System32, e é exatamente o que o onnxruntime procura para usar a placa.
+pub fn has_nvidia_gpu() -> bool {
+    std::env::var_os("SystemRoot")
+        .map(|root| std::path::Path::new(&root).join("System32").join("nvcuda.dll").exists())
+        .unwrap_or(false)
+}
+
+/// Pacotes com as bibliotecas CUDA 12 que o onnxruntime-gpu carrega
+/// (cuBLAS, cuDNN, cuFFT, cuRAND, runtime, NVRTC). O requirements.txt só
+/// lista o `onnxruntime-gpu`: sem estas DLLs o provider CUDA falha ao
+/// carregar ("cublasLt64_12.dll is missing") e o app cai para CPU em
+/// silêncio, ~17x mais lento. O upstream pede para o usuário instalar o
+/// CUDA Toolkit e o cuDNN à mão; aqui vêm por pip, sem instalar nada no
+/// sistema, e o run.py já registra nvidia/*/bin como pasta de DLLs.
+const CUDA_PACKAGES: &[&str] = &[
+    "nvidia-cuda-runtime-cu12",
+    "nvidia-cublas-cu12",
+    "nvidia-cudnn-cu12",
+    "nvidia-cufft-cu12",
+    "nvidia-curand-cu12",
+    "nvidia-cuda-nvrtc-cu12",
+];
+
+/// As bibliotecas CUDA já estão no Python da instalação?
+pub fn cuda_libs_installed() -> bool {
+    paths::python_dir()
+        .map(|p| {
+            p.join("Lib").join("site-packages").join("nvidia").join("cublas")
+                .join("bin").join("cublasLt64_12.dll").exists()
+        })
+        .unwrap_or(false)
 }
 
 /// Passo 1 — Python embeddable.
@@ -423,6 +459,23 @@ pub async fn ensure_dependencies(client: &reqwest::Client, rep: &Reporter) -> Re
         rep,
         Step::Dependencies,
     )?;
+
+    // Bibliotecas CUDA: só com placa NVIDIA, e pip pula o que já está
+    // instalado, então rodar de novo é barato.
+    if has_nvidia_gpu() {
+        rep.running(
+            Step::Dependencies,
+            "Instalando as bibliotecas CUDA da NVIDIA (~1,7 GB)…",
+        );
+        let mut args = vec!["-m", "pip", "install", "--progress-bar", "off"];
+        args.extend(CUDA_PACKAGES);
+        run_streamed(
+            Command::new(&python).args(&args),
+            "instalar as bibliotecas CUDA",
+            rep,
+            Step::Dependencies,
+        )?;
+    }
 
     rep.done(Step::Dependencies, "Dependências instaladas");
     Ok(())
