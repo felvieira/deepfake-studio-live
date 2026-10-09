@@ -194,6 +194,13 @@ QLabel#accelerator {
     padding: 8px 14px;
     font-weight: 600;
 }
+QLabel#acceleratorWait {
+    color: #b9b9b9;
+    background-color: #2a2a2a;
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-weight: 600;
+}
 QLabel#acceleratorWarn {
     color: #ffd27a;
     background-color: #3a2e12;
@@ -779,10 +786,136 @@ def _cuda_provider_usable() -> bool:
         return False
 
 
+# ─── aceleração: o que existe e o que está realmente em uso ───────────────
+
+_GPU_PROVIDERS = {
+    "CUDAExecutionProvider": "CUDA",
+    "TensorrtExecutionProvider": "TensorRT",
+    "DmlExecutionProvider": "DirectML",
+    "ROCMExecutionProvider": "ROCm",
+    "CoreMLExecutionProvider": "CoreML",
+    "OpenVINOExecutionProvider": "OpenVINO",
+}
+
+
+def _detect_gpu_name() -> str:
+    """Nome da placa de vídeo principal, ou "" se não achar nenhuma.
+
+    nvidia-smi responde em ~100 ms e dá o nome exato; para AMD/Intel cai
+    para o WMI. Roda numa thread (ver _GpuProbe): o WMI leva ~1 s.
+    """
+    import subprocess
+
+    flags = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW
+
+    def run(cmd: list[str]) -> str:
+        try:
+            out = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=8, creationflags=flags
+            )
+            return out.stdout.strip() if out.returncode == 0 else ""
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
+    name = run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"])
+    if name:
+        return name.splitlines()[0].strip()
+    if sys.platform == "win32":
+        names = run([
+            "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+            "(Get-CimInstance Win32_VideoController).Name",
+        ]).splitlines()
+        real = [n.strip() for n in names if n.strip() and "basic" not in n.lower()
+                and "remote" not in n.lower() and "virtual" not in n.lower()]
+        if real:
+            return real[0]
+    return ""
+
+
+class _GpuProbe(QThread):
+    found = Signal(str)
+
+    def run(self) -> None:
+        self.found.emit(_detect_gpu_name())
+
+
+def _runtime_providers() -> list[str]:
+    """Provider que cada modelo carregado de fato recebeu do onnxruntime.
+
+    É a única fonte confiável: a lista de providers "disponíveis" inclui o
+    CUDA mesmo quando ele falha ao carregar e a sessão cai para CPU. Vazio
+    enquanto nenhum modelo foi carregado.
+    """
+    sessions = []
+    try:
+        from modules.processors.frame import face_swapper
+
+        swapper = face_swapper.FACE_SWAPPER
+        if swapper is not None and getattr(swapper, "session", None) is not None:
+            sessions.append(swapper.session)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from modules import face_analyser
+
+        analyser = face_analyser.FACE_ANALYSER
+        if analyser is not None:
+            for model in getattr(analyser, "models", {}).values():
+                if getattr(model, "session", None) is not None:
+                    sessions.append(model.session)
+    except Exception:  # noqa: BLE001
+        pass
+    used = []
+    for session in sessions:
+        try:
+            used.append(session.get_providers()[0])
+        except Exception:  # noqa: BLE001
+            continue
+    return used
+
+
+def _predicted_gpu_api() -> str:
+    """API de GPU que deve funcionar, antes de qualquer modelo carregar."""
+    for provider in modules.globals.execution_providers:
+        if provider == "CUDAExecutionProvider":
+            if _cuda_provider_usable():
+                return "CUDA"
+        elif provider in _GPU_PROVIDERS:
+            return _GPU_PROVIDERS[provider]
+    return ""
+
+
+def _accelerator_info(gpu_name: Optional[str]) -> Tuple[str, str, str]:
+    """(nível, título, detalhe) do selo de aceleração.
+
+    nível: "ok" (GPU funcionando), "warn" (GPU ausente/sem uso) ou "wait".
+    """
+    used = _runtime_providers()
+    if used:
+        # Modelos carregados: aqui são fatos, não previsão.
+        api = next((_GPU_PROVIDERS[p] for p in used if p in _GPU_PROVIDERS), "")
+        if api:
+            return "ok", _("GPU in use · {api}").format(api=api), gpu_name or ""
+        if gpu_name:
+            return "warn", _("GPU found but NOT in use — running on CPU"), gpu_name
+        return "warn", _("Running on CPU — no GPU in use"), ""
+    if gpu_name is None:
+        return "wait", _("Detecting GPU…"), ""
+    api = _predicted_gpu_api()
+    if api:
+        return "ok", _("GPU ready · {api}").format(api=api), gpu_name
+    if gpu_name:
+        if "CUDAExecutionProvider" in modules.globals.execution_providers:
+            return "warn", _("GPU found but CUDA libraries are missing — will run on CPU"), gpu_name
+        return "warn", _("GPU found but no compatible runtime — will run on CPU"), gpu_name
+    return "warn", _("No compatible GPU found — running on CPU"), ""
+
+
 class MainWindow(QMainWindow):
     def __init__(self, start_cb: Callable, destroy_cb: Callable):
         super().__init__()
         load_switch_states()
+        self._gpu_name: Optional[str] = None  # None = ainda detectando
         self._start_cb = start_cb
         self._destroy_cb = destroy_cb
         self._source_labels: list[QLabel] = []
@@ -848,6 +981,10 @@ class MainWindow(QMainWindow):
         self._update_action_states()
         self._set_context_status()
 
+        self._gpu_probe = _GpuProbe()
+        self._gpu_probe.found.connect(self._on_gpu_detected)
+        self._gpu_probe.start()
+
     def _build_header(self) -> QHBoxLayout:
         row = QHBoxLayout()
         title_box = QVBoxLayout()
@@ -860,17 +997,32 @@ class MainWindow(QMainWindow):
         row.addLayout(title_box)
         row.addStretch(1)
 
-        providers = modules.globals.execution_providers
-        if _cuda_provider_usable():
-            accelerator, badge = _("CUDA ready"), "accelerator"
-        elif "CUDAExecutionProvider" in providers:
-            accelerator, badge = _("CPU mode · CUDA libraries missing"), "acceleratorWarn"
-        else:
-            accelerator, badge = _("CPU mode"), "accelerator"
-        self._accelerator_label = QLabel(f"●  {accelerator}")
-        self._accelerator_label.setObjectName(badge)
+        self._accelerator_label = QLabel()
+        self._accelerator_label.setTextFormat(Qt.TextFormat.RichText)
+        self._accelerator_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         row.addWidget(self._accelerator_label)
+        self._refresh_accelerator_badge()
         return row
+
+    def _refresh_accelerator_badge(self) -> None:
+        """Atualiza o selo com o que está em uso agora (ver _accelerator_info)."""
+        level, title, detail = _accelerator_info(self._gpu_name)
+        name = {"ok": "accelerator", "warn": "acceleratorWarn", "wait": "acceleratorWait"}[level]
+        text = f"<b>●&nbsp; {title}</b>"
+        if detail:
+            text += f"<br><span style='font-size:9pt; font-weight:400;'>{detail}</span>"
+        self._accelerator_label.setText(text)
+        label = self._accelerator_label
+        if label.objectName() != name:
+            label.setObjectName(name)
+            # O QSS só reavalia o seletor #id ao repolir o widget.
+            label.style().unpolish(label)
+            label.style().polish(label)
+
+    def _on_gpu_detected(self, name: str) -> None:
+        self._gpu_name = name
+        self._refresh_accelerator_badge()
+        self._set_context_status()
 
     def _build_mode_selector(self) -> QHBoxLayout:
         row = QHBoxLayout()
@@ -1237,6 +1389,9 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
             self._busy_bar.setVisible(False)
         self._update_action_states()
+        # Depois de um trabalho, os modelos já estão carregados: o selo passa
+        # de "previsto" para "em uso" com o que o onnxruntime realmente aplicou.
+        self._refresh_accelerator_badge()
 
     def _set_context_status(self) -> None:
         if self._mode_stack.currentIndex() == 0:
@@ -1251,7 +1406,8 @@ class MainWindow(QMainWindow):
         elif not self._camera_names or self._camera_names[0] == "No cameras found":
             self.set_status(_("Camera could not be opened. Choose another input."))
         elif _WEBCAM_PREVIEW is not None and _WEBCAM_PREVIEW.isVisible():
-            self.set_status(_("● Live  ·  Face processing is running."))
+            _level, accel, _detail = _accelerator_info(self._gpu_name)
+            self.set_status(_("● Live  ·  Face processing is running.") + "  ·  " + accel)
         else:
             self.set_status(_("Ready to start live processing."))
 

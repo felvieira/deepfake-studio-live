@@ -42,5 +42,20 @@
     "Select Camera:": "Escolher câmera:",
     "All mappings cleared!": "Todos os mapeamentos foram removidos!",
     "Mappings successfully submitted!": "Mapeamentos enviados com sucesso!",
-    "Source x Target Mapper is already open.": "O Mapeador de Origem x Destino já está aberto."
+    "Source x Target Mapper is already open.": "O Mapeador de Origem x Destino já está aberto.",
+    "GPU in use · {api}": "GPU em uso · {api}",
+    "GPU ready · {api}": "GPU pronta · {api}",
+    "GPU found but NOT in use — running on CPU": "GPU encontrada, mas NÃO está em uso — rodando na CPU",
+    "Running on CPU — no GPU in use": "Rodando na CPU — nenhuma GPU em uso",
+    "Detecting GPU…": "Detectando a GPU…",
+    "GPU found but CUDA libraries are missing — will run on CPU": "GPU encontrada, mas faltam as bibliotecas CUDA — vai rodar na CPU",
+    "GPU found but no compatible runtime — will run on CPU": "GPU encontrada, mas sem runtime compatível — vai rodar na CPU",
+    "No compatible GPU found — running on CPU": "Nenhuma GPU compatível encontrada — rodando na CPU",
+    "● Live  ·  Face processing is running.": "● Ao vivo  ·  Processando rostos.",
+    "Loading face models… the first time takes longer.": "Carregando os modelos de rosto… a primeira vez demora mais.",
+    "Opening the camera…": "Abrindo a câmera…",
+    "Could not load the face models: ": "Não consegui carregar os modelos de rosto: ",
+    "Detecting faces in the target…": "Detectando rostos no arquivo…",
+    "Processing file… this can take a while.": "Processando o arquivo… pode demorar.",
+    "Rendering preview…": "Gerando a pré-visualização…"
 }

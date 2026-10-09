@@ -72,6 +72,11 @@ pub fn launch_app() -> Result<u32, String> {
 
     let mut command = Command::new(&python);
     command.arg(&entry);
+    // O app abre em inglês por padrão; num Windows em português, abrir em
+    // português é o esperado e não exige o usuário achar a opção.
+    if let Some(lang) = ui_language() {
+        command.args(["--lang", lang]);
+    }
     // cwd em app/: run.py deriva project_root do próprio caminho, mas o
     // resto do projeto (switch_states.json, models/) é relativo ao cwd.
     //
@@ -113,6 +118,28 @@ pub fn launch_app() -> Result<u32, String> {
     }
 
     Ok(child.id())
+}
+
+/// Idioma da interface do app, derivado do idioma do Windows. `None` deixa o
+/// padrão (inglês). Só português tem tradução hoje além das upstream.
+fn ui_language() -> Option<&'static str> {
+    #[cfg(windows)]
+    {
+        let mut buf = [0u16; 85]; // LOCALE_NAME_MAX_LENGTH
+        let len = unsafe {
+            windows_sys::Win32::Globalization::GetUserDefaultLocaleName(
+                buf.as_mut_ptr(),
+                buf.len() as i32,
+            )
+        };
+        if len > 0 {
+            let name = String::from_utf16_lossy(&buf[..(len as usize - 1)]);
+            if name.to_ascii_lowercase().starts_with("pt") {
+                return Some("pt-br");
+            }
+        }
+    }
+    None
 }
 
 /// Pergunta ao app instalado qual execution provider o onnxruntime realmente
