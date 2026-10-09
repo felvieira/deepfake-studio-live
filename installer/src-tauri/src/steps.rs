@@ -830,7 +830,7 @@ fn unzip_subdirs(archive: &Path, dest: &Path, mappings: &[(&str, &str)]) -> Resu
 /// passo do Python, antes do código do app ser copiado) — o caminho é
 /// gravado de qualquer forma, porque é fixo (sempre root()/app) e o Python
 /// só precisa que ele exista no momento de rodar run.py, não agora.
-fn fix_pth_restrictions(python_dir: &Path, app_dir: &Path) -> Result<(), String> {
+pub fn fix_pth_restrictions(python_dir: &Path, app_dir: &Path) -> Result<(), String> {
     let entries = std::fs::read_dir(python_dir)
         .map_err(|e| format!("não consegui ler {}: {e}", python_dir.display()))?;
     let app_dir_str = app_dir.to_string_lossy().to_string();
@@ -969,5 +969,50 @@ mod requirements_tests {
         let found = requirements_line(&path, "numpy").unwrap();
         assert_eq!(found, None);
         std::fs::remove_file(&path).ok();
+    }
+}
+
+#[cfg(test)]
+mod pth_tests {
+    use super::fix_pth_restrictions;
+
+    /// O `._pth` real do embeddable usa CRLF. Estado de partida = o que
+    /// versões antigas do instalador deixaram (só `import site`, sem o
+    /// caminho do app) — é exatamente o que a VM tinha.
+    const OLD_STATE: &str = "python312.zip
+.
+
+# Uncomment to run site.main() automatically
+import site
+";
+
+    fn setup(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("dlc-pth-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("python312._pth"), OLD_STATE).unwrap();
+        let app = dir.join("app");
+        (dir, app)
+    }
+
+    #[test]
+    fn adds_app_dir_to_an_already_site_enabled_pth() {
+        let (dir, app) = setup("add");
+        fix_pth_restrictions(&dir, &app).unwrap();
+        let text = std::fs::read_to_string(dir.join("python312._pth")).unwrap();
+        assert!(text.lines().any(|l| l.trim() == app.to_string_lossy()), "{text}");
+        assert!(text.lines().any(|l| l.trim() == "import site"), "{text}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn is_idempotent() {
+        let (dir, app) = setup("idem");
+        fix_pth_restrictions(&dir, &app).unwrap();
+        fix_pth_restrictions(&dir, &app).unwrap();
+        let text = std::fs::read_to_string(dir.join("python312._pth")).unwrap();
+        let n = text.lines().filter(|l| l.trim() == app.to_string_lossy()).count();
+        assert_eq!(n, 1, "{text}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

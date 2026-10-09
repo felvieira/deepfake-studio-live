@@ -40,6 +40,16 @@ pub fn launch_app() -> Result<u32, String> {
         ));
     }
 
+    // Reaplica o ajuste do `._pth` a cada abertura, não só na instalação.
+    // fix_pth_restrictions só rodava dentro de ensure_python, e a UI mostra
+    // "Abrir" (não "Instalar") assim que acha o onnxruntime e o run.py —
+    // então qualquer instalação feita antes de uma correção nunca a
+    // recebia, e run.py continuava morrendo com "No module named
+    // 'modules'" sem que nada pudesse consertar. É idempotente e custa um
+    // arquivo de 80 bytes, então corrigir aqui cobre também quem já tem
+    // o app instalado.
+    crate::steps::fix_pth_restrictions(&crate::paths::python_dir()?, &app_dir)?;
+
     // stdout/stderr do processo iam para lugar nenhum: CREATE_NO_WINDOW
     // suprime o console, e sem um Stdio explícito o Rust também não os
     // captura. Se run.py levantar uma exceção antes de a janela do Qt
@@ -86,7 +96,12 @@ pub fn launch_app() -> Result<u32, String> {
     // aqui troca isso por um erro imediato e legível em vez de deixar o
     // usuário olhando pra tela achando que "não fez nada".
     std::thread::sleep(Duration::from_millis(800));
+    // Saída com código 0 não é crash (ex.: processo que se desanexa e
+    // devolve o controle); só reporta erro se terminou com falha.
     if let Ok(Some(status)) = child.try_wait() {
+        if status.success() {
+            return Ok(child.id());
+        }
         let log = std::fs::read_to_string(&log_path).unwrap_or_default();
         let tail: Vec<&str> = log.lines().rev().take(20).collect();
         let tail = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
