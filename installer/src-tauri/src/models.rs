@@ -35,6 +35,16 @@ pub const MODELS: &[ModelFile] = &[
     ModelFile { name: "buffalo_l/buffalo_l/w600k_r50.onnx", size: 174_383_860 },
 ];
 
+/// Todos os modelos estão em disco, completos? Os downloads gravam em
+/// `.part` e só renomeiam no fim, então um arquivo com o nome final e o
+/// tamanho esperado é um download terminado.
+pub fn all_present(models_dir: &std::path::Path) -> bool {
+    MODELS.iter().all(|m| {
+        let path = models_dir.join(m.name.replace('/', std::path::MAIN_SEPARATOR_STR));
+        std::fs::metadata(path).map(|md| md.len() == m.size).unwrap_or(false)
+    })
+}
+
 /// Soma dos tamanhos, para a UI mostrar o total antes de começar e para a
 /// checagem de espaço em disco.
 pub fn total_bytes() -> u64 {

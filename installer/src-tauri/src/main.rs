@@ -44,7 +44,12 @@ fn install_info() -> Result<InstallInfo, String> {
         .join("Lib")
         .join("site-packages")
         .join("onnxruntime");
-    let installed = deps_marker.exists() && paths::app_dir()?.join("run.py").exists();
+    // Os modelos também contam: sem eles o app abre e trava no primeiro
+    // "Start live", e uma instalação interrompida no passo de modelos
+    // aparecia como concluída.
+    let installed = deps_marker.exists()
+        && paths::app_dir()?.join("run.py").exists()
+        && models::all_present(&paths::models_dir()?);
     Ok(InstallInfo {
         installed,
         root: root.to_string_lossy().to_string(),
