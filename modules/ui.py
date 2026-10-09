@@ -31,18 +31,20 @@ except ImportError:
 from PIL import Image, ImageOps
 from PySide6.QtCore import (
     QObject,
+    QSize,
     QThread,
     QTimer,
     Qt,
     Signal,
 )
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -134,6 +136,11 @@ QGroupBox::title {
     color: #9ec5ff;
 }
 
+QGroupBox#faceCard {
+    margin-top: 0;
+    padding-top: 12px;
+}
+
 QPushButton {
     background-color: #2d6cdf;
     color: white;
@@ -198,6 +205,18 @@ QComboBox {
     min-height: 24px;
 }
 QComboBox:hover { border-color: #2d6cdf; }
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
+    width: 28px;
+    border: none;
+    background: transparent;
+}
+QComboBox::down-arrow {
+    image: url(__CHEVRON__);
+    width: 12px;
+    height: 12px;
+}
 QComboBox QAbstractItemView {
     background-color: #2a2a2a;
     selection-background-color: #2d6cdf;
@@ -250,6 +269,7 @@ QLabel#linkLabel {
 }
 
 QScrollArea { border: none; background: transparent; }
+QWidget#scrollRoot { background-color: #1e1e1e; }
 
 QFrame#card {
     background-color: #262626;
@@ -484,6 +504,54 @@ def get_available_cameras() -> Tuple[List[int], List[str]]:
     return (indices, names) if names else ([], ["No cameras found"])
 
 
+# ─── branding ────────────────────────────────────────────────────────────
+
+
+_ICON_SIZES = (16, 32, 48, 64, 128, 256, 512)
+
+
+def _load_app_icon() -> QIcon:
+    """Ícone do app, montado com todos os tamanhos de media/brand/.
+
+    Vários tamanhos deixam o Windows escolher o nítido para cada lugar
+    (barra de título, barra de tarefas, Alt+Tab) em vez de reduzir um só.
+    Faltar arquivo não é erro: o app abre com o ícone padrão do Qt.
+    """
+    icon = QIcon()
+    brand_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "media", "brand"
+    )
+    for size in _ICON_SIZES:
+        path = os.path.join(brand_dir, f"icon-{size}.png")
+        if os.path.isfile(path):
+            icon.addFile(path, QSize(size, size))
+    return icon
+
+
+def _chevron_path() -> str:
+    """Caminho (com '/') do chevron usado na seta dos combos; o QSS só
+    aceita url() com barras normais, mesmo no Windows."""
+    return os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "media", "brand", "chevron-down.svg",
+    ).replace("\\", "/")
+
+
+def _set_windows_app_id() -> None:
+    """Sem um AppUserModelID próprio, o Windows agrupa a janela sob o
+    python.exe e mostra o ícone dele na barra de tarefas."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            modules.metadata.app_id
+        )
+    except (AttributeError, OSError):
+        pass
+
+
 # ─── main window ─────────────────────────────────────────────────────────
 
 
@@ -528,14 +596,22 @@ class MainWindow(QMainWindow):
         self._destroy_cb = destroy_cb
         self._source_labels: list[QLabel] = []
 
-        self.setWindowTitle(
-            f"{modules.metadata.name} {modules.metadata.version} {modules.metadata.edition}"
-        )
-        self.setMinimumSize(900, 760)
+        self.setWindowTitle(modules.metadata.name)
+        self.setMinimumSize(720, 520)
         self.resize(1040, 900)
 
+        # Com as configurações avançadas abertas o conteúdo precisa de bem
+        # mais altura que uma janela comum. Sem rolagem, o Qt espremia as
+        # linhas até os textos ficarem cortados e sobrepostos; numa área
+        # rolável cada linha mantém o tamanho que precisa e a janela rola.
         root = QWidget()
-        self.setCentralWidget(root)
+        root.setObjectName("scrollRoot")
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(root)
+        self.setCentralWidget(scroll)
         layout = QVBoxLayout(root)
         layout.setContentsMargins(20, 18, 20, 14)
         layout.setSpacing(12)
@@ -546,11 +622,12 @@ class MainWindow(QMainWindow):
         self._mode_stack = QStackedWidget()
         self._mode_stack.addWidget(self._build_file_page())
         self._mode_stack.addWidget(self._build_live_page())
-        layout.addWidget(self._mode_stack, 1)
+        layout.addWidget(self._mode_stack)
 
         advanced_toggle, advanced_panel = self._build_advanced_settings()
         layout.addWidget(advanced_toggle)
         layout.addWidget(advanced_panel)
+        layout.addStretch(1)
 
         self._status_label = QLabel("")
         self._status_label.setObjectName("statusLabel")
@@ -564,7 +641,7 @@ class MainWindow(QMainWindow):
     def _build_header(self) -> QHBoxLayout:
         row = QHBoxLayout()
         title_box = QVBoxLayout()
-        title = QLabel("Deep Live Cam")
+        title = QLabel(modules.metadata.name)
         title.setObjectName("appTitle")
         subtitle = QLabel(_("AI face replacement"))
         subtitle.setObjectName("appSubtitle")
@@ -598,6 +675,16 @@ class MainWindow(QMainWindow):
         self.mode_file.setChecked(index == 0)
         self.mode_live.setChecked(index == 1)
         self._mode_stack.setCurrentIndex(index)
+        # O QStackedWidget tem a altura da página mais alta; sem isto a de
+        # arquivos era esticada até a altura da de câmera, abrindo vãos
+        # enormes dentro dos cards. Só a página atual conta para o tamanho.
+        for i in range(self._mode_stack.count()):
+            page = self._mode_stack.widget(i)
+            page.setSizePolicy(
+                QSizePolicy.Policy.Preferred,
+                QSizePolicy.Policy.Preferred if i == index else QSizePolicy.Policy.Ignored,
+            )
+        self._mode_stack.updateGeometry()
         self._update_action_states()
         self._set_context_status()
 
@@ -611,7 +698,9 @@ class MainWindow(QMainWindow):
         source: bool,
     ) -> QGroupBox:
         card = QGroupBox()
+        card.setObjectName("faceCard")
         layout = QVBoxLayout(card)
+        layout.setSpacing(8)
         heading = QLabel(_(title))
         heading.setObjectName("sectionTitle")
         description_label = QLabel(_(description))
@@ -788,6 +877,7 @@ class MainWindow(QMainWindow):
         video_grid.addWidget(self.sw_keep_fps, 0, 0)
         video_grid.addWidget(self.sw_keep_audio, 0, 1)
         video_grid.addWidget(self.sw_keep_frames, 1, 0)
+        video_grid.setRowStretch(2, 1)
 
         face_box = QGroupBox(_("Face selection"))
         face_grid = QGridLayout(face_box)
@@ -802,6 +892,8 @@ class MainWindow(QMainWindow):
             self.cb_face_mode.setCurrentIndex(1)
         self.cb_face_mode.currentIndexChanged.connect(self._on_face_mode_changed)
         face_grid.addWidget(self.cb_face_mode, 0, 1)
+        face_grid.setColumnStretch(1, 1)
+        face_grid.setRowStretch(1, 1)
 
         quality_box = QGroupBox(_("Face quality"))
         quality_grid = QGridLayout(quality_box)
@@ -828,6 +920,8 @@ class MainWindow(QMainWindow):
             quality_grid, 3, "Sharpness", 0, 50,
             modules.globals.sharpness * 10, 10, self._on_sharpness_change, ""
         )
+        quality_grid.setColumnStretch(1, 1)
+        quality_grid.setRowStretch(4, 1)
 
         details_box = QGroupBox(_("Face details"))
         details_grid = QGridLayout(details_box)
@@ -835,6 +929,8 @@ class MainWindow(QMainWindow):
             details_grid, 0, "Preserve original mouth", 0, 100,
             modules.globals.mouth_mask_size, 1, self._on_mouth_mask_change, "%"
         )
+        details_grid.setColumnStretch(1, 1)
+        details_grid.setRowStretch(1, 1)
 
         live_box = QGroupBox(_("Live camera"))
         live_grid = QGridLayout(live_box)
@@ -844,6 +940,7 @@ class MainWindow(QMainWindow):
         live_grid.addWidget(self.sw_show_fps, 0, 0)
         live_grid.addWidget(self.sw_color_fix, 0, 1)
         live_grid.addWidget(self.sw_live_mirror, 1, 0)
+        live_grid.setRowStretch(2, 1)
 
         content.addWidget(video_box, 0, 0)
         content.addWidget(face_box, 0, 1)
@@ -1834,11 +1931,14 @@ def init(
     global _APP, _MAIN, _PREVIEW, _LANG, _BRIDGE
 
     _LANG = LanguageManager(lang)
+    _set_windows_app_id()
     if QApplication.instance() is None:
         _APP = QApplication(sys.argv)
     else:
         _APP = QApplication.instance()
-    _APP.setStyleSheet(QSS)
+    _APP.setApplicationName(modules.metadata.name)
+    _APP.setWindowIcon(_load_app_icon())
+    _APP.setStyleSheet(QSS.replace("__CHEVRON__", _chevron_path()))
 
     _BRIDGE = _UIBridge()
     _MAIN = MainWindow(start, destroy)
