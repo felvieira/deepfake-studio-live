@@ -44,6 +44,7 @@ live_resizable: bool = True
 camera_input_combobox: Any | None = None # Placeholder for UI element if needed
 webcam_preview_running: bool = False
 show_fps: bool = False
+keep_models_loaded: bool = False  # manter os modelos na GPU depois de parar o live / terminar um arquivo
 virtual_camera_enabled: bool = False  # Publish processed live frames to UnityCapture
 
 # System Configuration

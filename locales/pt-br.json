@@ -57,5 +57,15 @@
     "Could not load the face models: ": "Não consegui carregar os modelos de rosto: ",
     "Detecting faces in the target…": "Detectando rostos no arquivo…",
     "Processing file… this can take a while.": "Processando o arquivo… pode demorar.",
-    "Rendering preview…": "Gerando a pré-visualização…"
+    "Rendering preview…": "Gerando a pré-visualização…",
+    "Stop live": "Parar live",
+    "Stop the live preview and release the camera": "Para o live e libera a câmera",
+    "Free GPU memory": "Liberar memória da GPU",
+    "Unload the face models from the GPU so other programs can use it. They reload on next use.": "Descarrega os modelos de rosto da GPU para outros programas poderem usá-la. Eles recarregam no próximo uso.",
+    "Freeing GPU memory…": "Liberando a memória da GPU…",
+    "GPU memory released.": "Memória da GPU liberada.",
+    "Live stopped. GPU memory released.": "Live parado. Memória da GPU liberada.",
+    "Live stopped.": "Live parado.",
+    "Keep models in GPU memory after stopping": "Manter os modelos na memória da GPU após parar",
+    "Restarts faster, but keeps using GPU memory until you close the app": "Reinicia mais rápido, mas continua ocupando a GPU até fechar o app"
 }

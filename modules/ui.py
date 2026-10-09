@@ -67,6 +67,7 @@ from PySide6.QtWidgets import (
 
 import modules.globals
 import modules.metadata
+from modules.gpu_memory import models_loaded, unload_models
 from modules.capturer import get_video_frame, get_video_frame_total
 from modules.face_analyser import (
     add_blank_map,
@@ -194,6 +195,16 @@ QLabel#accelerator {
     padding: 8px 14px;
     font-weight: 600;
 }
+QPushButton#linkButton {
+    background: transparent;
+    color: #9ec5ff;
+    padding: 2px 4px;
+    font-weight: 500;
+    font-size: 10pt;
+    text-decoration: underline;
+}
+QPushButton#linkButton:hover { color: #cfe2ff; background: transparent; }
+QPushButton#linkButton:disabled { color: #666; background: transparent; }
 QLabel#acceleratorWait {
     color: #b9b9b9;
     background-color: #2a2a2a;
@@ -398,6 +409,7 @@ def save_switch_states():
         "live_resizable": modules.globals.live_resizable,
         "fp_ui": modules.globals.fp_ui,
         "show_fps": modules.globals.show_fps,
+        "keep_models_loaded": modules.globals.keep_models_loaded,
         "mouth_mask": modules.globals.mouth_mask,
         "show_mouth_mask_box": modules.globals.show_mouth_mask_box,
         "mouth_mask_size": modules.globals.mouth_mask_size,
@@ -426,6 +438,7 @@ def load_switch_states():
         modules.globals.live_resizable = state.get("live_resizable", False)
         modules.globals.fp_ui = state.get("fp_ui", {"face_enhancer": False})
         modules.globals.show_fps = state.get("show_fps", False)
+        modules.globals.keep_models_loaded = state.get("keep_models_loaded", False)
         # Mouth mask always starts disabled (slider at 0) on launch,
         # regardless of the persisted value — enable it explicitly each session.
         modules.globals.mouth_mask_size = 0.0
@@ -916,6 +929,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         load_switch_states()
         self._gpu_name: Optional[str] = None  # None = ainda detectando
+        self._closing = False
+        self._busy_depth = 0
+        self._background: Optional[_BackgroundTask] = None
         self._start_cb = start_cb
         self._destroy_cb = destroy_cb
         self._source_labels: list[QLabel] = []
@@ -967,8 +983,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(advanced_panel)
         layout.addStretch(1)
 
-        self._busy_depth = 0
-        self._background = None
         self._busy_bar = _BusyBar()
         footer_layout.addWidget(self._busy_bar)
 
@@ -1000,7 +1014,18 @@ class MainWindow(QMainWindow):
         self._accelerator_label = QLabel()
         self._accelerator_label.setTextFormat(Qt.TextFormat.RichText)
         self._accelerator_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        row.addWidget(self._accelerator_label)
+        self.btn_free_gpu = QPushButton(_("Free GPU memory"))
+        self.btn_free_gpu.setObjectName("linkButton")
+        self.btn_free_gpu.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_free_gpu.setToolTip(
+            _("Unload the face models from the GPU so other programs can use it. They reload on next use.")
+        )
+        self.btn_free_gpu.clicked.connect(self._on_free_gpu)
+        badge_box = QVBoxLayout()
+        badge_box.setSpacing(2)
+        badge_box.addWidget(self._accelerator_label)
+        badge_box.addWidget(self.btn_free_gpu, alignment=Qt.AlignmentFlag.AlignRight)
+        row.addLayout(badge_box)
         self._refresh_accelerator_badge()
         return row
 
@@ -1012,6 +1037,9 @@ class MainWindow(QMainWindow):
         if detail:
             text += f"<br><span style='font-size:9pt; font-weight:400;'>{detail}</span>"
         self._accelerator_label.setText(text)
+        # "Liberar" só faz sentido com modelos carregados.
+        self.btn_free_gpu.setVisible(models_loaded())
+        self.btn_free_gpu.setEnabled(self._busy_depth == 0)
         label = self._accelerator_label
         if label.objectName() != name:
             label.setObjectName(name)
@@ -1307,6 +1335,12 @@ class MainWindow(QMainWindow):
         live_grid.addWidget(self.sw_show_fps, 0, 0)
         live_grid.addWidget(self.sw_color_fix, 0, 1)
         live_grid.addWidget(self.sw_live_mirror, 1, 0)
+        self.sw_keep_models = make(
+            "keep_models_loaded",
+            "Keep models in GPU memory after stopping",
+            "Restarts faster, but keeps using GPU memory until you close the app",
+        )
+        live_grid.addWidget(self.sw_keep_models, 1, 1)
         live_grid.setRowStretch(2, 1)
 
         content.addWidget(video_box, 0, 0)
@@ -1422,7 +1456,63 @@ class MainWindow(QMainWindow):
         self.btn_preview.setEnabled(idle and has_source and has_target)
         self.btn_swap.setEnabled(idle and has_source and bool(modules.globals.target_path) and is_image(modules.globals.target_path))
         camera_ok = bool(self._camera_names and self._camera_names[0] != "No cameras found")
-        self.btn_live.setEnabled(idle and camera_ok and has_source)
+        live_running = _WEBCAM_PREVIEW is not None
+        # Com o live rodando o botão vira "Stop live" e tem de continuar
+        # clicável mesmo que a origem/câmera mudem.
+        self.btn_live.setEnabled(idle and (live_running or (camera_ok and has_source)))
+        self._sync_live_button()
+
+    def _sync_live_button(self) -> None:
+        """"Start live" enquanto parado, "Stop live" (vermelho) enquanto roda."""
+        live = _WEBCAM_PREVIEW is not None
+        wanted = "danger" if live else "primary"
+        self.btn_live.setText(_("Stop live") if live else _("Start live"))
+        self.btn_live.setToolTip(
+            _("Stop the live preview and release the camera")
+            if live
+            else _("Start real-time face swap from the selected webcam")
+        )
+        if self.btn_live.objectName() != wanted:
+            self.btn_live.setObjectName(wanted)
+            self.btn_live.style().unpolish(self.btn_live)
+            self.btn_live.style().polish(self.btn_live)
+
+    def _release_gpu(self, announce: bool = True) -> None:
+        """Descarrega os modelos da GPU (ver modules.gpu_memory)."""
+        if self._busy_depth:
+            return
+        had_models = models_loaded()
+        if announce and had_models:
+            with self.busy(_("Freeing GPU memory…")):
+                unload_models()
+        else:
+            unload_models()
+        self._refresh_accelerator_badge()
+        if announce and had_models:
+            self.set_status(_("GPU memory released."))
+
+    def _on_free_gpu(self) -> None:
+        if _WEBCAM_PREVIEW is not None:
+            _WEBCAM_PREVIEW.close()  # para o live antes de soltar os modelos
+        self._release_gpu()
+
+    def _on_live_stopped(self) -> None:
+        """O live acabou (botão Stop, janela fechada ou câmera perdida).
+
+        Os modelos ocupam a GPU até o programa fechar se ninguém os soltar,
+        então por padrão são descarregados aqui; quem prefere recomeçar
+        rápido liga "Keep models in GPU memory".
+        """
+        self._update_action_states()
+        if modules.globals.keep_models_loaded:
+            self._set_context_status()
+            self._refresh_accelerator_badge()
+            return
+        had_models = models_loaded()
+        self._release_gpu(announce=False)
+        self.set_status(
+            _("Live stopped. GPU memory released.") if had_models else _("Live stopped.")
+        )
 
     def _refresh_source_labels(self) -> None:
         path = modules.globals.source_path
@@ -1558,6 +1648,7 @@ class MainWindow(QMainWindow):
         self.sw_color_fix.setChecked(False)
         self.sw_show_fps.setChecked(False)
         self.sw_live_mirror.setChecked(False)
+        self.sw_keep_models.setChecked(False)
         self.cb_face_mode.setCurrentIndex(0)
         self.cb_enhancer.setCurrentText("None")
         self.s_transparency.setValue(100)
@@ -1604,6 +1695,8 @@ class MainWindow(QMainWindow):
             _RECENT_OUTPUT_DIR = os.path.dirname(path)
             with self.busy(_("Processing file… this can take a while.")):
                 self._start_cb()
+            if not modules.globals.keep_models_loaded:
+                self._release_gpu(announce=False)
 
     def _on_toggle_preview(self) -> None:
         if _PREVIEW is None:
@@ -1624,6 +1717,9 @@ class MainWindow(QMainWindow):
         self.set_status(_("Virtual camera output enabled.") if enabled else _("Virtual camera output disabled."))
 
     def _on_live(self) -> None:
+        if _WEBCAM_PREVIEW is not None:
+            _WEBCAM_PREVIEW.close()  # closeEvent chama _on_live_stopped
+            return
         idx = self.cb_camera.currentIndex()
         if not modules.globals.source_path:
             self.set_status(_("Choose a face before starting live mode."))
@@ -1651,6 +1747,7 @@ class MainWindow(QMainWindow):
                 self.set_status(_("Opening the camera…"))
                 QApplication.processEvents()
                 _open_webcam_preview(camera_index)
+                self._update_action_states()
                 self._set_context_status()
 
             def models_failed(message: str) -> None:
@@ -1670,6 +1767,7 @@ class MainWindow(QMainWindow):
         self._set_context_status()
 
     def closeEvent(self, event):
+        self._closing = True
         self._destroy_cb()
         event.accept()
 
@@ -2072,9 +2170,14 @@ class WebcamPreviewWindow(QWidget):
         except Exception:
             pass
         global _WEBCAM_PREVIEW
-        if _WEBCAM_PREVIEW is self:
+        genuine_stop = _WEBCAM_PREVIEW is self
+        if genuine_stop:
             _WEBCAM_PREVIEW = None
         event.accept()
+        # Só é parada de verdade se não foi substituída por um live novo
+        # (_open_webcam_preview) — senão descarregaria os modelos recém-carregados.
+        if genuine_stop and _MAIN is not None and not _MAIN._closing:
+            _MAIN._on_live_stopped()
 
 
 
