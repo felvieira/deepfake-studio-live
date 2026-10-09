@@ -431,6 +431,11 @@ if (initial) {
   if (initial.installed) {
     go.textContent = "Abrir";
     setStatus("Já instalado em " + initial.root);
+    invoke("ensure_shortcuts")
+      .then((dirs) => {
+        if (dirs.length) setStatus('Já instalado. Atalho "Deepfake Studio Live" na Área de Trabalho e no Menu Iniciar.');
+      })
+      .catch(() => {});
   } else {
     const free = initial.free_bytes != null ? `, ${gb(initial.free_bytes)} livres` : "";
     setStatus(`Precisa de ${gb(initial.required_bytes)}${free}`);
@@ -442,8 +447,8 @@ go.addEventListener("click", async () => {
     go.disabled = true;
     setStatus("Iniciando o aplicativo…");
     try {
+      // Em sucesso o instalador se fecha sozinho: não há mais o que fazer aqui.
       await invoke("open_app");
-      setStatus("Aplicativo iniciado", "ok");
     } catch (e) {
       setStatus(String(e), "error");
     }
@@ -459,17 +464,20 @@ go.addEventListener("click", async () => {
   renderOverall();
   setStatus("Iniciando a instalação…");
   try {
-    const accelerator = await invoke("run_install");
+    const { accelerator, shortcuts } = await invoke("run_install");
     installStartedAt = null;
     go.disabled = false;
     go.textContent = "Abrir";
     const total = fmtTime(Date.now() - (info["python"].started ?? Date.now()));
     overallBar.style.width = "100%";
     overallCount.textContent = "100%";
+    const where = shortcuts.length
+      ? ' Use o atalho "Deepfake Studio Live" na Área de Trabalho ou no Menu Iniciar.'
+      : "";
     if (accelerator === "CPU") {
-      setStatus(`Instalado em ${total}, mas rodando em CPU — a GPU não foi detectada`, "");
+      setStatus(`Instalado em ${total}, mas rodando em CPU — a GPU não foi detectada.${where}`, "");
     } else {
-      setStatus(`Instalado em ${total} — acelerador: ${accelerator}`, "ok");
+      setStatus(`Instalado em ${total} — acelerador: ${accelerator}.${where}`, "ok");
     }
   } catch (e) {
     installStartedAt = null;

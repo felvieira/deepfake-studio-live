@@ -15,12 +15,21 @@ mod launch;
 mod models;
 mod paths;
 mod progress;
+mod shortcuts;
 mod steps;
 
 use progress::{Reporter, Step, StepState, StepUpdate};
 use serde::Serialize;
 use std::path::PathBuf;
 use tauri::AppHandle;
+
+/// O que a UI recebe quando a instalação termina.
+#[derive(Serialize)]
+struct InstallResult {
+    accelerator: String,
+    /// Pastas onde o atalho "Deepfake Studio Live" foi criado (vazio se falhou).
+    shortcuts: Vec<String>,
+}
 
 #[derive(Serialize)]
 struct InstallInfo {
@@ -128,7 +137,7 @@ mod tests {
 }
 
 #[tauri::command]
-async fn run_install(app: AppHandle) -> Result<String, String> {
+async fn run_install(app: AppHandle) -> Result<InstallResult, String> {
     let rep = Reporter::new(app.clone());
     rep.log("=== instalação iniciada ===");
 
@@ -215,13 +224,70 @@ async fn run_install(app: AppHandle) -> Result<String, String> {
         }
     };
 
+    // Atalhos que abrem o app direto. Falhar aqui não invalida a instalação:
+    // o app funciona, só o caminho até ele é menos conveniente.
+    let shortcuts = match shortcuts::create_app_shortcuts() {
+        Ok(dirs) => {
+            rep.log(&format!("atalhos criados em: {}", dirs.join(", ")));
+            dirs
+        }
+        Err(e) => {
+            rep.log(&format!("não consegui criar os atalhos: {e}"));
+            Vec::new()
+        }
+    };
+
     rep.log("=== instalação concluída ===");
-    Ok(accelerator)
+    Ok(InstallResult { accelerator, shortcuts })
 }
 
 #[tauri::command]
-fn open_app() -> Result<u32, String> {
-    launch::launch_app()
+fn open_app(app: AppHandle) -> Result<u32, String> {
+    let pid = launch::launch_app()?;
+    // O instalador já cumpriu o papel: deixar a janela aberta atrás do app
+    // só confunde (e é o motivo de o usuário achar que "abriu o instalador").
+    app.exit(0);
+    Ok(pid)
+}
+
+/// Modo `--launch`, usado pelos atalhos "Deepfake Studio Live": abre o app e
+/// sai, sem criar nenhuma janela do instalador. Um erro vira uma caixa de
+/// mensagem, porque neste modo não há UI nem console para mostrá-lo.
+fn launch_and_exit() -> ! {
+    match launch::launch_app() {
+        Ok(_) => std::process::exit(0),
+        Err(e) => {
+            show_error("Deepfake Studio Live", &format!("Não consegui abrir o aplicativo.
+
+{e}
+
+Abra o \"Deepfake Studio Live Installer\" e clique em Instalar para reparar."));
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn show_error(title: &str, text: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    let (title, text) = (wide(title), wide(text));
+    unsafe {
+        MessageBoxW(std::ptr::null_mut(), text.as_ptr(), title.as_ptr(), MB_OK | MB_ICONERROR);
+    }
+}
+
+#[cfg(not(windows))]
+fn show_error(title: &str, text: &str) {
+    eprintln!("{title}: {text}");
+}
+
+/// Recria os atalhos de uma instalação que já existe. Chamado pela UI quando
+/// abre já instalado: quem instalou antes de os atalhos existirem (ou os
+/// apagou) os recebe sem precisar reinstalar nada.
+#[tauri::command]
+fn ensure_shortcuts() -> Result<Vec<String>, String> {
+    shortcuts::create_app_shortcuts()
 }
 
 #[tauri::command]
@@ -264,11 +330,16 @@ fn open_log() -> Result<(), String> {
 }
 
 fn main() {
+    if std::env::args().any(|a| a == "--launch") {
+        launch_and_exit();
+    }
+
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             install_info,
             run_install,
             open_app,
+            ensure_shortcuts,
             open_log
         ])
         .setup(|app| {
