@@ -29,18 +29,23 @@ except ImportError:
     pyvirtualcam = None
 
 from PIL import Image, ImageOps
+from contextlib import contextmanager
+
 from PySide6.QtCore import (
+    QEasingCurve,
     QObject,
+    QRectF,
     QSize,
     QThread,
     QTimer,
+    QVariantAnimation,
     Qt,
     Signal,
 )
-from PySide6.QtGui import QIcon, QImage, QPixmap
+from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
+    QAbstractButton,
     QApplication,
-    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -189,6 +194,13 @@ QLabel#accelerator {
     padding: 8px 14px;
     font-weight: 600;
 }
+QLabel#acceleratorWarn {
+    color: #ffd27a;
+    background-color: #3a2e12;
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-weight: 600;
+}
 QLabel#flowHint {
     color: #9ec5ff;
     background-color: #242b36;
@@ -223,18 +235,8 @@ QComboBox QAbstractItemView {
     border: 1px solid #404040;
 }
 
-QCheckBox {
-    spacing: 8px;
-    padding: 4px 0;
-}
-QCheckBox::indicator {
-    width: 36px; height: 18px;
-    border-radius: 9px;
-    background-color: #3a3a3a;
-}
-QCheckBox::indicator:checked {
-    background-color: #2d6cdf;
-}
+QLabel#switchLabel { padding: 4px 0; }
+QLabel#switchLabel:disabled { color: #777777; }
 
 QSlider::groove:horizontal {
     height: 6px;
@@ -564,8 +566,88 @@ def _make_image_drop(text: str, size: Tuple[int, int]) -> QLabel:
     return label
 
 
+class _ToggleTrack(QAbstractButton):
+    """A pílula do toggle: trilho que muda de cor e uma bolinha que desliza.
+
+    O QCheckBox estilizado por QSS só trocava a cor do trilho, sem bolinha:
+    ligado e desligado se distinguiam apenas por um azul, e nada indicava
+    que era clicável. Aqui o estado é legível pela posição da bolinha.
+    """
+
+    _W, _H, _MARGIN = 46, 26, 3
+
+    def __init__(self, checked: bool):
+        super().__init__()
+        self.setCheckable(True)
+        self.setChecked(checked)
+        self.setFixedSize(self._W, self._H)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._progress = 1.0 if checked else 0.0
+        self._hover = False
+        self._anim = QVariantAnimation(self)
+        self._anim.setDuration(150)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.valueChanged.connect(self._on_anim)
+        self.toggled.connect(self._animate_to)
+
+    def _on_anim(self, value) -> None:
+        self._progress = float(value)
+        self.update()
+
+    def _animate_to(self, checked: bool) -> None:
+        self._anim.stop()
+        self._anim.setStartValue(self._progress)
+        self._anim.setEndValue(1.0 if checked else 0.0)
+        self._anim.start()
+
+    def enterEvent(self, event) -> None:
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hover = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        off = QColor("#4a4a4a" if self._hover else "#3f3f3f")
+        on = QColor("#3a7af0" if self._hover else "#2d6cdf")
+        t = self._progress
+        track = QColor(
+            int(off.red() + (on.red() - off.red()) * t),
+            int(off.green() + (on.green() - off.green()) * t),
+            int(off.blue() + (on.blue() - off.blue()) * t),
+        )
+        knob = QColor("#ffffff")
+        if not self.isEnabled():
+            track.setAlphaF(0.45)
+            knob.setAlphaF(0.55)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(track)
+        painter.drawRoundedRect(QRectF(0, 0, self._W, self._H), self._H / 2, self._H / 2)
+
+        d = self._H - 2 * self._MARGIN
+        x = self._MARGIN + (self._W - 2 * self._MARGIN - d) * t
+        # Sombra leve para a bolinha se destacar do trilho claro.
+        painter.setBrush(QColor(0, 0, 0, 70))
+        painter.drawEllipse(QRectF(x, self._MARGIN + 1, d, d))
+        painter.setBrush(knob)
+        painter.drawEllipse(QRectF(x, self._MARGIN, d, d))
+
+        if self.hasFocus():
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QColor("#9ec5ff"))
+            painter.drawRoundedRect(
+                QRectF(0.5, 0.5, self._W - 1, self._H - 1), self._H / 2, self._H / 2
+            )
+
+
 class _Switch(QWidget):
-    """Compact toggle switch with label + optional tooltip."""
+    """Toggle com rótulo; o rótulo também é clicável."""
 
     toggled = Signal(bool)
 
@@ -573,19 +655,128 @@ class _Switch(QWidget):
         super().__init__()
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        self._checkbox = QCheckBox(text)
-        self._checkbox.setChecked(initial)
-        self._checkbox.toggled.connect(self.toggled.emit)
+        layout.setSpacing(10)
+        self._track = _ToggleTrack(initial)
+        self._track.toggled.connect(self.toggled.emit)
+        self._label = QLabel(text)
+        self._label.setObjectName("switchLabel")
+        self._label.setCursor(Qt.CursorShape.PointingHandCursor)
         if tooltip:
-            self._checkbox.setToolTip(tooltip)
-        layout.addWidget(self._checkbox)
+            self.setToolTip(tooltip)
+        layout.addWidget(self._track)
+        layout.addWidget(self._label)
         layout.addStretch(1)
 
+    def mousePressEvent(self, event) -> None:
+        # O trilho trata o próprio clique; o que chega aqui veio do rótulo
+        # ou da folga ao lado, e também deve alternar.
+        if event.button() == Qt.MouseButton.LeftButton and self._track.isEnabled():
+            self._track.toggle()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
     def isChecked(self) -> bool:
-        return self._checkbox.isChecked()
+        return self._track.isChecked()
 
     def setChecked(self, value: bool) -> None:
-        self._checkbox.setChecked(value)
+        self._track.setChecked(value)
+
+
+class _BusyBar(QWidget):
+    """Faixa fina de "carregando": um trecho que corre de lado a lado.
+
+    Só anima enquanto visível, para não gastar timer à toa. Feita à mão
+    porque o QProgressBar indeterminado não anima de forma confiável
+    quando estilizado por QSS.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedHeight(4)
+        self._pos = 0.0
+        self._anim = QVariantAnimation(self)
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        self._anim.setDuration(1100)
+        self._anim.setLoopCount(-1)
+        self._anim.setEasingCurve(QEasingCurve.Type.InOutSine)
+        self._anim.valueChanged.connect(self._on_anim)
+        self.setVisible(False)
+
+    def _on_anim(self, value) -> None:
+        self._pos = float(value)
+        self.update()
+
+    def showEvent(self, event) -> None:
+        self._anim.start()
+        super().showEvent(event)
+
+    def hideEvent(self, event) -> None:
+        self._anim.stop()
+        super().hideEvent(event)
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        w, h = self.width(), self.height()
+        painter.setBrush(QColor("#2a2a2a"))
+        painter.drawRoundedRect(QRectF(0, 0, w, h), h / 2, h / 2)
+        seg = w * 0.3
+        painter.setBrush(QColor("#4d8dff"))
+        painter.drawRoundedRect(QRectF((w - seg) * self._pos, 0, seg, h), h / 2, h / 2)
+
+
+class _BackgroundTask(QThread):
+    """Roda uma função fora da thread da interface e avisa quando acaba.
+
+    Carregar os modelos leva vários segundos; feito na thread da UI, a
+    janela congelava sem nenhum sinal de vida. Com isto a barra de
+    carregamento continua animando e o usuário vê que está trabalhando.
+    """
+
+    succeeded = Signal()
+    failed = Signal(str)
+
+    def __init__(self, work: Callable[[], None]):
+        super().__init__()
+        self._work = work
+
+    def run(self) -> None:
+        try:
+            self._work()
+        except Exception as exc:  # noqa: BLE001 — qualquer falha vira mensagem na UI
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+        else:
+            self.succeeded.emit()
+
+
+def _cuda_provider_usable() -> bool:
+    """O provider CUDA realmente carrega, ou só aparece na lista?
+
+    get_available_providers() lista o CUDA mesmo quando falta cuBLAS/cuDNN;
+    aí a primeira sessão falha e tudo roda em CPU. Mostrar "CUDA ready" nessa
+    situação é mentir ao usuário.
+    """
+    if "CUDAExecutionProvider" not in modules.globals.execution_providers:
+        return False
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+
+        import onnxruntime
+
+        dll = os.path.join(
+            os.path.dirname(onnxruntime.__file__), "capi", "onnxruntime_providers_cuda.dll"
+        )
+        if not os.path.isfile(dll):
+            return True
+        ctypes.WinDLL(dll)
+        return True
+    except OSError:
+        return False
 
 
 class MainWindow(QMainWindow):
@@ -611,7 +802,21 @@ class MainWindow(QMainWindow):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(root)
-        self.setCentralWidget(scroll)
+        # O rodapé (carregando + status) fica fora da rolagem: precisa estar
+        # sempre à vista, senão o aviso de "carregando" some quando a janela
+        # é menor que o conteúdo.
+        shell = QWidget()
+        shell.setObjectName("scrollRoot")
+        shell_layout = QVBoxLayout(shell)
+        shell_layout.setContentsMargins(0, 0, 0, 0)
+        shell_layout.setSpacing(0)
+        shell_layout.addWidget(scroll, 1)
+        footer = QWidget()
+        footer_layout = QVBoxLayout(footer)
+        footer_layout.setContentsMargins(20, 6, 20, 10)
+        footer_layout.setSpacing(6)
+        shell_layout.addWidget(footer)
+        self.setCentralWidget(shell)
         layout = QVBoxLayout(root)
         layout.setContentsMargins(20, 18, 20, 14)
         layout.setSpacing(12)
@@ -629,10 +834,15 @@ class MainWindow(QMainWindow):
         layout.addWidget(advanced_panel)
         layout.addStretch(1)
 
+        self._busy_depth = 0
+        self._background = None
+        self._busy_bar = _BusyBar()
+        footer_layout.addWidget(self._busy_bar)
+
         self._status_label = QLabel("")
         self._status_label.setObjectName("statusLabel")
         self._status_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        layout.addWidget(self._status_label)
+        footer_layout.addWidget(self._status_label)
 
         self._select_mode(0)
         self._update_action_states()
@@ -651,9 +861,14 @@ class MainWindow(QMainWindow):
         row.addStretch(1)
 
         providers = modules.globals.execution_providers
-        accelerator = _("CUDA ready") if "CUDAExecutionProvider" in providers else _("CPU mode")
+        if _cuda_provider_usable():
+            accelerator, badge = _("CUDA ready"), "accelerator"
+        elif "CUDAExecutionProvider" in providers:
+            accelerator, badge = _("CPU mode · CUDA libraries missing"), "acceleratorWarn"
+        else:
+            accelerator, badge = _("CPU mode"), "accelerator"
         self._accelerator_label = QLabel(f"●  {accelerator}")
-        self._accelerator_label.setObjectName("accelerator")
+        self._accelerator_label.setObjectName(badge)
         row.addWidget(self._accelerator_label)
         return row
 
@@ -996,6 +1211,33 @@ class MainWindow(QMainWindow):
     def set_status(self, text: str) -> None:
         self._status_label.setText(text)
 
+    @contextmanager
+    def busy(self, text: str):
+        """Mostra "carregando": texto, barra animada, cursor de espera e
+        ações desligadas, até o bloco terminar. Repinta antes de entrar no
+        trabalho pesado, senão o aviso só aparece depois que ele acaba."""
+        self._begin_busy(text)
+        try:
+            yield
+        finally:
+            self._end_busy()
+
+    def _begin_busy(self, text: str) -> None:
+        self._busy_depth += 1
+        self.set_status(text)
+        self._busy_bar.setVisible(True)
+        if self._busy_depth == 1:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self._update_action_states()
+        QApplication.processEvents()
+
+    def _end_busy(self) -> None:
+        self._busy_depth = max(0, self._busy_depth - 1)
+        if self._busy_depth == 0:
+            QApplication.restoreOverrideCursor()
+            self._busy_bar.setVisible(False)
+        self._update_action_states()
+
     def _set_context_status(self) -> None:
         if self._mode_stack.currentIndex() == 0:
             if not modules.globals.source_path:
@@ -1019,11 +1261,12 @@ class MainWindow(QMainWindow):
             modules.globals.target_path
             and (is_image(modules.globals.target_path) or is_video(modules.globals.target_path))
         )
-        self.btn_start.setEnabled(has_source and has_target)
-        self.btn_preview.setEnabled(has_source and has_target)
-        self.btn_swap.setEnabled(has_source and bool(modules.globals.target_path) and is_image(modules.globals.target_path))
+        idle = getattr(self, "_busy_depth", 0) == 0
+        self.btn_start.setEnabled(idle and has_source and has_target)
+        self.btn_preview.setEnabled(idle and has_source and has_target)
+        self.btn_swap.setEnabled(idle and has_source and bool(modules.globals.target_path) and is_image(modules.globals.target_path))
         camera_ok = bool(self._camera_names and self._camera_names[0] != "No cameras found")
-        self.btn_live.setEnabled(camera_ok and has_source)
+        self.btn_live.setEnabled(idle and camera_ok and has_source)
 
     def _refresh_source_labels(self) -> None:
         path = modules.globals.source_path
@@ -1176,12 +1419,11 @@ class MainWindow(QMainWindow):
             return
         if modules.globals.map_faces:
             modules.globals.source_target_map = []
-            if is_image(modules.globals.target_path):
-                update_status(_("Getting unique faces"))
-                get_unique_faces_from_target_image()
-            elif is_video(modules.globals.target_path):
-                update_status(_("Getting unique faces"))
-                get_unique_faces_from_target_video()
+            with self.busy(_("Detecting faces in the target…")):
+                if is_image(modules.globals.target_path):
+                    get_unique_faces_from_target_image()
+                elif is_video(modules.globals.target_path):
+                    get_unique_faces_from_target_video()
             if modules.globals.source_target_map:
                 _open_mapper_dialog(self._start_cb, modules.globals.source_target_map)
             else:
@@ -1204,8 +1446,8 @@ class MainWindow(QMainWindow):
         if path:
             modules.globals.output_path = path
             _RECENT_OUTPUT_DIR = os.path.dirname(path)
-            self.set_status(_("Processing file…"))
-            self._start_cb()
+            with self.busy(_("Processing file… this can take a while.")):
+                self._start_cb()
 
     def _on_toggle_preview(self) -> None:
         if _PREVIEW is None:
@@ -1213,8 +1455,9 @@ class MainWindow(QMainWindow):
         if _PREVIEW.isVisible():
             _PREVIEW.hide()
         elif modules.globals.source_path and modules.globals.target_path:
-            _PREVIEW.init_for_target()
-            _PREVIEW.refresh_frame(0)
+            with self.busy(_("Rendering preview…")):
+                _PREVIEW.init_for_target()
+                _PREVIEW.refresh_frame(0)
             _PREVIEW.show()
 
     def _on_virtual_camera_toggled(self, enabled: bool) -> None:
@@ -1236,11 +1479,35 @@ class MainWindow(QMainWindow):
             _LIVE_MAPPER.raise_()
             return
         if not modules.globals.map_faces:
-            from modules.face_analyser import get_face_analyser
-            from modules.processors.frame.face_swapper import get_face_swapper
-            get_face_analyser()
-            get_face_swapper()
-            _open_webcam_preview(self._camera_indices[idx])
+            if self._background is not None and self._background.isRunning():
+                return
+            camera_index = self._camera_indices[idx]
+
+            def load_models() -> None:
+                from modules.face_analyser import get_face_analyser
+                from modules.processors.frame.face_swapper import get_face_swapper
+
+                get_face_analyser()
+                get_face_swapper()
+
+            def models_ready() -> None:
+                self._end_busy()
+                self.set_status(_("Opening the camera…"))
+                QApplication.processEvents()
+                _open_webcam_preview(camera_index)
+                self._set_context_status()
+
+            def models_failed(message: str) -> None:
+                self._end_busy()
+                self.set_status(_("Could not load the face models: ") + message)
+
+            self._begin_busy(_("Loading face models… the first time takes longer."))
+            task = _BackgroundTask(load_models)
+            task.succeeded.connect(models_ready)
+            task.failed.connect(models_failed)
+            self._background = task
+            task.start()
+            return
         else:
             modules.globals.source_target_map = []
             _open_live_mapper_dialog(self._camera_indices[idx], modules.globals.source_target_map)
