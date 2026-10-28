@@ -1,30 +1,39 @@
 //! Abrir o app instalado.
 //!
-//! O cuidado aqui é não estragar o que run.py faz sozinho. Ele monta o
-//! ambiente CUDA no começo da execução (add_dll_directory para
-//! venv/Lib/site-packages/nvidia/*/bin), porque o Python 3.8+ ignora o PATH
-//! para dependências nativas de módulos de extensão. Se esse trabalho não
-//! acontecer, o onnxruntime não acha cuDNN/cuBLAS e cai para CPU **em
-//! silêncio**: o app abre, funciona e fica lento, sem mensagem de erro.
+//! O launcher faz o mínimo: roda o Python da instalação com cwd em app/ e
+//! deixa o run.py cuidar do resto (inclusive registrar as DLLs do CUDA no
+//! Windows — sem isso o onnxruntime cai para CPU em silêncio). O que não pode
+//! faltar é o cwd: sem ele o run.py calcula project_root errado.
 //!
-//! Por isso o launcher faz o mínimo: roda o python do venv, com cwd em app/,
-//! e deixa o run.py cuidar do resto. O que não pode faltar é o cwd — sem ele
-//! o run.py calcula project_root errado.
+//! "Aberto" significa a janela ter aparecido: o app grava um arquivo quando
+//! mostra a janela principal (DSL_READY_FILE — ver modules/ui.py). Antes,
+//! bastava o processo existir depois de 800 ms; um app que morria durante a
+//! carga (que leva de 5 a 30 s) ou que desistia de abrir com código 0 ainda
+//! era dado como "iniciado", e a pessoa ficava olhando para a tela sem nada.
 
 use std::fs::File;
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
+/// Até quando esperar a janela. Passado isso, considera aberto — uma máquina
+/// lenta na primeira abertura não deve ganhar um erro falso — e para de
+/// esperar.
+const READY_TIMEOUT: Duration = Duration::from_secs(180);
 
-/// Não abrir janela de console junto com a GUI.
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// O que fazer depois que a janela apareceu.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AfterReady {
+    /// Devolve o controle (o app segue sozinho).
+    Return,
+    /// Fica esperando o app fechar. No macOS é o launcher do atalho: o
+    /// pedido de câmera do Python é feito em nome de quem o abriu, e quem o
+    /// abriu precisa continuar vivo para isso valer.
+    WaitForExit,
+}
 
-pub fn launch_app() -> Result<u32, String> {
+pub fn launch_app(after_ready: AfterReady) -> Result<u32, String> {
     let app_dir = crate::paths::app_dir()?;
-    let python = crate::paths::venv_python()?;
+    let python = crate::paths::python_exe()?;
     let entry = app_dir.join("run.py");
 
     if !python.exists() {
@@ -34,32 +43,16 @@ pub fn launch_app() -> Result<u32, String> {
         ));
     }
     if !entry.exists() {
-        return Err(format!(
-            "run.py não está em {} — instalação incompleta",
-            entry.display()
-        ));
+        return Err(format!("run.py não está em {} — instalação incompleta", entry.display()));
     }
 
-    // Reaplica o ajuste do `._pth` a cada abertura, não só na instalação.
-    // fix_pth_restrictions só rodava dentro de ensure_python, e a UI mostra
-    // "Abrir" (não "Instalar") assim que acha o onnxruntime e o run.py —
-    // então qualquer instalação feita antes de uma correção nunca a
-    // recebia, e run.py continuava morrendo com "No module named
-    // 'modules'" sem que nada pudesse consertar. É idempotente e custa um
-    // arquivo de 80 bytes, então corrigir aqui cobre também quem já tem
-    // o app instalado.
-    crate::steps::fix_pth_restrictions(&crate::paths::python_dir()?, &app_dir)?;
+    // Ajustes que dependem do sistema (no Windows, o `._pth` do embeddable,
+    // reaplicado a cada abertura para cobrir instalações antigas).
+    crate::platform::prepare_launch(&crate::paths::python_dir()?, &app_dir)?;
 
-    // stdout/stderr do processo iam para lugar nenhum: CREATE_NO_WINDOW
-    // suprime o console, e sem um Stdio explícito o Rust também não os
-    // captura. Se run.py levantar uma exceção antes de a janela do Qt
-    // abrir — import faltando, erro do onnxruntime na inicialização — o
-    // processo morre e não sobra rastro nenhum de por quê, nem para o
-    // usuário nem para quem for depurar depois. Redireciona para um
-    // arquivo em vez de Stdio::piped(): o app roda solto após este
-    // comando retornar, então não há como (nem por quê) manter um handle
-    // vivo lendo a saída.
-    let log_path = crate::paths::logs_dir()?.join("app.log");
+    // stdout/stderr vão para um arquivo: sem console, uma exceção antes de a
+    // janela abrir não deixaria rastro nenhum.
+    let log_path = crate::paths::app_log()?;
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("não consegui criar {}: {e}", parent.display()))?;
@@ -70,102 +63,75 @@ pub fn launch_app() -> Result<u32, String> {
         .try_clone()
         .map_err(|e| format!("não consegui preparar o log: {e}"))?;
 
+    let ready = crate::paths::ready_file()?;
+    let _ = std::fs::remove_file(&ready);
+
     let mut command = Command::new(&python);
-    command.arg(&entry);
-    // O app abre em inglês por padrão; num Windows em português, abrir em
-    // português é o esperado e não exige o usuário achar a opção.
-    if let Some(lang) = ui_language() {
-        command.args(["--lang", lang]);
-    }
-    // cwd em app/: run.py deriva project_root do próprio caminho, mas o
-    // resto do projeto (switch_states.json, models/) é relativo ao cwd.
-    //
-    // app/ entrar em sys.path (pra `from modules import ...` resolver) não
-    // é responsabilidade daqui — nem current_dir() nem PYTHONPATH bastam
-    // com o Python embeddable, porque o `._pth` dele ignora os dois. Ver
-    // steps::fix_pth_restrictions, chamada uma vez durante a instalação,
-    // que resolve isso editando o próprio `._pth`.
-    command.current_dir(&app_dir);
-    command.stdout(Stdio::from(stdout_file));
-    command.stderr(Stdio::from(stderr_file));
+    command
+        .arg(&entry)
+        // cwd em app/: run.py deriva project_root do próprio caminho, mas o
+        // resto do projeto (switch_states.json, models/) é relativo ao cwd.
+        .current_dir(&app_dir)
+        .env("DSL_READY_FILE", &ready)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file));
+    crate::platform::hide_console(&mut command);
 
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
+    let mut child = command.spawn().map_err(|e| format!("não consegui iniciar o app: {e}"))?;
+    let pid = child.id();
 
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("não consegui iniciar o app: {e}"))?;
-
-    // Um crash na inicialização (import faltando, exceção antes da janela
-    // abrir) normalmente acontece em menos de um segundo. Uma pausa curta
-    // aqui troca isso por um erro imediato e legível em vez de deixar o
-    // usuário olhando pra tela achando que "não fez nada".
-    std::thread::sleep(Duration::from_millis(800));
-    // Saída com código 0 não é crash (ex.: processo que se desanexa e
-    // devolve o controle); só reporta erro se terminou com falha.
-    if let Ok(Some(status)) = child.try_wait() {
-        if status.success() {
-            return Ok(child.id());
+    let started = Instant::now();
+    loop {
+        if ready.exists() {
+            break;
         }
-        let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-        let tail: Vec<&str> = log.lines().rev().take(20).collect();
-        let tail = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
-        return Err(format!(
-            "o aplicativo fechou logo após abrir (código {}).\n{}",
-            status.code().map(|c| c.to_string()).unwrap_or_else(|| "desconhecido".into()),
-            if tail.is_empty() { "(sem saída capturada)".to_string() } else { tail }
-        ));
+        if let Ok(Some(status)) = child.try_wait() {
+            // Terminou antes de mostrar a janela: é falha, qualquer que seja
+            // o código de saída.
+            return Err(format!(
+                "o aplicativo fechou antes de abrir a janela (código {}).\n{}",
+                status.code().map(|c| c.to_string()).unwrap_or_else(|| "desconhecido".into()),
+                log_tail(&log_path)
+            ));
+        }
+        if started.elapsed() > READY_TIMEOUT {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
     }
 
-    Ok(child.id())
+    if after_ready == AfterReady::WaitForExit {
+        let _ = child.wait();
+    }
+    Ok(pid)
 }
 
-/// Idioma da interface do app, derivado do idioma do Windows. `None` deixa o
-/// padrão (inglês). Só português tem tradução hoje além das upstream.
-fn ui_language() -> Option<&'static str> {
-    #[cfg(windows)]
-    {
-        let mut buf = [0u16; 85]; // LOCALE_NAME_MAX_LENGTH
-        let len = unsafe {
-            windows_sys::Win32::Globalization::GetUserDefaultLocaleName(
-                buf.as_mut_ptr(),
-                buf.len() as i32,
-            )
-        };
-        if len > 0 {
-            let name = String::from_utf16_lossy(&buf[..(len as usize - 1)]);
-            if name.to_ascii_lowercase().starts_with("pt") {
-                return Some("pt-br");
-            }
-        }
+/// As últimas linhas do log do app, para a mensagem de erro.
+fn log_tail(path: &std::path::Path) -> String {
+    let log = std::fs::read_to_string(path).unwrap_or_default();
+    let tail: Vec<&str> = log.lines().filter(|l| !l.trim().is_empty()).rev().take(20).collect();
+    if tail.is_empty() {
+        "(sem saída capturada)".to_string()
+    } else {
+        tail.into_iter().rev().collect::<Vec<_>>().join("\n")
     }
-    None
 }
 
 /// Pergunta ao app instalado qual execution provider o onnxruntime realmente
-/// carregou.
+/// consegue usar.
 ///
 /// Existe porque a queda para CPU é silenciosa: sem checar, uma instalação
 /// com CUDA quebrado parece bem-sucedida e o usuário só percebe pela
-/// lentidão. Roda o python do venv com o mesmo preâmbulo de DLLs do run.py
-/// e devolve a lista de providers disponíveis.
+/// lentidão. Roda o Python da instalação com o mesmo preâmbulo de DLLs do
+/// run.py (sem efeito fora do Windows) e devolve a lista de providers.
 pub fn detect_execution_provider() -> Result<String, String> {
     let app_dir = crate::paths::app_dir()?;
-    let python = crate::paths::venv_python()?;
+    let python = crate::paths::python_exe()?;
     if !python.exists() {
         return Err("instalação não encontrada".into());
     }
 
-    // Reproduz o registro de DLLs do run.py antes de importar onnxruntime —
-    // importar direto daria um falso negativo, já que o preâmbulo do run.py
-    // é justamente o que torna os providers de GPU carregáveis.
-    //
-    // Duas pastas são checadas, igual ao run.py real (run.py:14-15): não há
-    // mais venv/ desde que a instalação passou a usar o Python embeddable
-    // direto (ver paths::venv_python), então sys.prefix/Lib/site-packages é
-    // onde os pacotes realmente estão — mas o run.py também verifica
-    // venv/Lib/site-packages, sem quebrar se não existir, então este probe
-    // faz o mesmo em vez de assumir qual dos dois é o caminho real.
     let probe = r#"
 import os, sys, json
 root = os.getcwd()
@@ -207,18 +173,26 @@ except Exception as exc:
 
     let mut command = Command::new(&python);
     command.arg("-c").arg(probe).current_dir(&app_dir);
+    crate::platform::hide_console(&mut command);
 
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
-
-    let output = command
-        .output()
-        .map_err(|e| format!("não consegui checar o acelerador: {e}"))?;
-
+    let output = command.output().map_err(|e| format!("não consegui checar o acelerador: {e}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if stdout.is_empty() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("checagem falhou: {}", stderr.trim()));
     }
     Ok(stdout)
+}
+
+/// Nome curto do acelerador a partir da lista de providers.
+pub fn accelerator_name(providers: &str) -> &'static str {
+    if providers.contains("CUDAExecutionProvider") {
+        "CUDA"
+    } else if providers.contains("CoreMLExecutionProvider") {
+        "CoreML"
+    } else if providers.contains("DmlExecutionProvider") {
+        "DirectML"
+    } else {
+        "CPU"
+    }
 }

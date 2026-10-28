@@ -1,46 +1,31 @@
 //! Onde a instalação vive.
 //!
-//! Tudo fica sob %LOCALAPPDATA%\DeepLiveCam: é gravável pelo usuário sem
-//! elevação, sobrevive a atualizações e sai limpo na desinstalação. A única
-//! etapa que pede admin é o registro do driver da câmera virtual, que se
-//! auto-eleva sozinho.
+//! Windows: %LOCALAPPDATA%\DeepLiveCam. macOS: ~/Library/Application
+//! Support/DeepLiveCam. Os dois são graváveis pelo usuário sem elevação e
+//! sobrevivem a atualizações (ver platform::default_root).
+//!
+//! `DSL_INSTALL_ROOT` troca a raiz — usado pelo CI e por testes para instalar
+//! do zero numa pasta descartável sem tocar a instalação de verdade.
 
 use std::path::PathBuf;
 
-/// Raiz da instalação. Erra se LOCALAPPDATA não existir — em Windows isso só
-/// acontece num ambiente quebrado, e falhar cedo é melhor que instalar num
-/// lugar imprevisível.
 pub fn root() -> Result<PathBuf, String> {
-    let base = std::env::var("LOCALAPPDATA")
-        .map_err(|_| "LOCALAPPDATA não está definido — ambiente Windows inesperado".to_string())?;
-    Ok(PathBuf::from(base).join("DeepLiveCam"))
+    match std::env::var_os("DSL_INSTALL_ROOT") {
+        Some(custom) if !custom.is_empty() => Ok(PathBuf::from(custom)),
+        _ => crate::platform::default_root(),
+    }
 }
 
+/// Python próprio da instalação. Não há venv: o Python da instalação já é
+/// isolado e descartável, então as dependências vão direto nele. No Windows
+/// é o embeddable oficial (sem `venv` nem `pip` de fábrica — ver
+/// platform::ensure_pip); no macOS, o python-build-standalone.
 pub fn python_dir() -> Result<PathBuf, String> {
     Ok(root()?.join("python"))
 }
 
-/// Não existe venv de verdade: o Python embeddable oficial não inclui o
-/// módulo `venv` nem `pip` (é uma distribuição deliberadamente mínima —
-/// sem ensurepip, sem tkinter). Rodar `python -m venv` nele falha com
-/// "No module named venv" — só se descobre isso testando numa máquina
-/// sem outro Python instalado, porque em dev sempre havia um Python do
-/// sistema por perto para criar o venv.
-///
-/// A saída é não precisar de venv: instalamos o pip nesse próprio Python
-/// (get-pip.py) e instalamos as dependências direto nele, sem isolar em
-/// outra pasta. Ele já é auto-contido dentro de python_dir(), então isso
-/// não "suja" nada do sistema — o embeddable inteiro é descartável.
-///
-/// O motivo de ainda existir esta função, e não simplesmente usar
-/// python_dir() direto: run.py:15 também procura DLLs da NVIDIA em
-/// `<pasta do run.py>/venv/Lib/site-packages/nvidia/*/bin`. Sem essa
-/// pasta a busca simplesmente não encontra nada ali — mas run.py:14
-/// também varre `sys.prefix/Lib/site-packages`, que é onde os pacotes
-/// deste Python realmente vão parar. Então basta que o interpretador
-/// usado seja este aqui; nenhuma pasta venv/ precisa existir.
-pub fn venv_python() -> Result<PathBuf, String> {
-    Ok(python_dir()?.join("python.exe"))
+pub fn python_exe() -> Result<PathBuf, String> {
+    Ok(crate::platform::python_executable(&python_dir()?))
 }
 
 pub fn app_dir() -> Result<PathBuf, String> {
@@ -59,3 +44,13 @@ pub fn install_log() -> Result<PathBuf, String> {
     Ok(logs_dir()?.join("install.log"))
 }
 
+/// Saída (stdout/stderr) do app da última vez que foi aberto.
+pub fn app_log() -> Result<PathBuf, String> {
+    Ok(logs_dir()?.join("app.log"))
+}
+
+/// Arquivo que o app cria quando a janela aparece (ver launch.rs e
+/// modules/ui.py:_signal_ready).
+pub fn ready_file() -> Result<PathBuf, String> {
+    Ok(logs_dir()?.join("app.ready"))
+}

@@ -1,323 +1,67 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! Instalador do Deepfake Studio Live.
+//! Instalador do Deepfake Studio Live (Windows e macOS).
 //!
-//! Instala em %LOCALAPPDATA%\DeepLiveCam: Python embeddable com pip e as
-//! dependências instaladas nele diretamente (sem venv — ver
-//! paths::venv_python), o código do app, os modelos ONNX e o driver da
-//! câmera virtual. Depois abre o app.
+//! Instala na pasta de dados do usuário (ver paths): um Python próprio com
+//! as dependências instaladas nele direto, o código do app, os modelos ONNX
+//! e a câmera virtual. Depois abre o app.
 //!
-//! A queda do onnxruntime para CPU é silenciosa — ver
-//! launch::detect_execution_provider, que existe só por causa disso.
+//! O mesmo executável tem três papéis:
+//! - sem argumentos: a janela de instalação;
+//! - `--launch` (ou, no macOS, rodando como o atalho "Deepfake Studio
+//!   Live.app"): abre o app direto, sem janela de instalação;
+//! - `--install-headless`: instala pelo terminal, sem janela (CI e linha de
+//!   comando). Sai com código 0 em sucesso.
 
 mod download;
+mod install;
 mod launch;
 mod models;
 mod paths;
+mod platform;
 mod progress;
-mod shortcuts;
 mod steps;
 
 use progress::{Reporter, Step, StepState, StepUpdate};
-use serde::Serialize;
-use std::path::PathBuf;
 use tauri::AppHandle;
 
-/// O que a UI recebe quando a instalação termina.
-#[derive(Serialize)]
-struct InstallResult {
-    accelerator: String,
-    /// Pastas onde o atalho "Deepfake Studio Live" foi criado (vazio se falhou).
-    shortcuts: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct InstallInfo {
-    installed: bool,
-    root: String,
-    /// Bytes que a instalação precisa, para a UI avisar antes de começar.
-    required_bytes: u64,
-    free_bytes: Option<u64>,
-    models_bytes: u64,
+#[tauri::command]
+fn install_info() -> Result<install::InstallInfo, String> {
+    install::info()
 }
 
 #[tauri::command]
-fn install_info() -> Result<InstallInfo, String> {
-    let root = paths::root()?;
-    // python.exe existir só prova que o passo 1 rodou. Checar um pacote que
-    // só existe depois do `pip install -r requirements.txt` terminar evita
-    // reportar "já instalado" numa instalação que parou no meio — como a
-    // que motivou esta função a existir (venv sem pip, deps nunca chegaram
-    // a instalar).
-    let deps_marker = paths::python_dir()?
-        .join("Lib")
-        .join("site-packages")
-        .join("onnxruntime");
-    // Os modelos também contam: sem eles o app abre e trava no primeiro
-    // "Start live", e uma instalação interrompida no passo de modelos
-    // aparecia como concluída.
-    // Com placa NVIDIA, as bibliotecas CUDA também contam: sem elas o app
-    // abre e roda 17x mais devagar, em CPU, sem nenhum erro à vista.
-    let installed = deps_marker.exists()
-        && paths::app_dir()?.join("run.py").exists()
-        && models::all_present(&paths::models_dir()?)
-        && (!steps::has_nvidia_gpu() || steps::cuda_libs_installed());
-    Ok(InstallInfo {
-        installed,
-        root: root.to_string_lossy().to_string(),
-        required_bytes: steps::required_bytes(),
-        free_bytes: steps::free_disk_bytes().ok(),
-        models_bytes: models::total_bytes(),
-    })
+async fn run_install(app: AppHandle) -> Result<install::InstallResult, String> {
+    let rep = Reporter::new(app);
+    install::run(&rep).await
 }
 
-/// De onde sai o código do app.
+/// Abre o app a partir da janela do instalador e fecha o instalador — deixar
+/// a janela aberta atrás do app só confunde.
 ///
-/// Procura um checkout subindo a partir do .exe: rodando de dentro do
-/// repositório (desenvolvimento), instala o código local, o que evita baixar
-/// de novo o que já está no disco e permite testar mudanças ainda não
-/// publicadas. Numa máquina limpa nada é encontrado e quem assume é
-/// steps::fetch_app_code, que baixa o Release.
-fn source_dir() -> Result<PathBuf, String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    find_checkout(exe.parent())
-}
-
-/// Separada de source_dir() para poder ser testada sem depender de onde o
-/// binário de teste está.
-fn find_checkout(start: Option<&std::path::Path>) -> Result<PathBuf, String> {
-    let mut candidate = start.map(|p| p.to_path_buf());
-    while let Some(dir) = candidate {
-        if dir.join("run.py").exists() && dir.join("requirements.txt").exists() {
-            return Ok(dir);
-        }
-        candidate = dir.parent().map(|p| p.to_path_buf());
-    }
-    Err("não encontrei o código do aplicativo para instalar".into())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::find_checkout;
-
-    /// Um .exe dentro do repositório acha o checkout subindo os diretórios —
-    /// é o que faz o instalador usar o código local em vez de rebaixar o
-    /// Release.
-    #[test]
-    fn finds_checkout_from_nested_dir() {
-        let tmp = std::env::temp_dir().join("dlc-test-checkout");
-        let nested = tmp.join("installer").join("target").join("release");
-        std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(tmp.join("run.py"), "").unwrap();
-        std::fs::write(tmp.join("requirements.txt"), "").unwrap();
-
-        let found = find_checkout(Some(&nested)).expect("deveria achar o checkout");
-        assert_eq!(found, tmp);
-
-        std::fs::remove_dir_all(&tmp).ok();
-    }
-
-    /// Fora do repositório não acha nada, e o instalador cai para o Release.
-    #[test]
-    fn no_checkout_outside_repo() {
-        let tmp = std::env::temp_dir().join("dlc-test-empty");
-        std::fs::create_dir_all(&tmp).unwrap();
-        assert!(find_checkout(Some(&tmp)).is_err());
-        std::fs::remove_dir_all(&tmp).ok();
-    }
-
-    /// run.py sozinho não basta: sem requirements.txt o passo das
-    /// dependências falharia depois, então é melhor não considerar
-    /// aquilo um checkout válido.
-    #[test]
-    fn partial_checkout_is_not_enough() {
-        let tmp = std::env::temp_dir().join("dlc-test-partial");
-        std::fs::create_dir_all(&tmp).unwrap();
-        std::fs::write(tmp.join("run.py"), "").unwrap();
-        assert!(find_checkout(Some(&tmp)).is_err());
-        std::fs::remove_dir_all(&tmp).ok();
-    }
-}
-
-/// Mensagem de falha para a tela. O erro técnico (saída do pip, códigos do
-/// Windows…) só faz sentido para suporte, então vai inteiro para o log e a
-/// tela diz em qual parte deu errado e onde ver os detalhes.
-fn friendly_failure(rep: &Reporter, step: Step, technical: &str) -> String {
-    rep.log(&format!("[{}] erro técnico: {technical}", step.label()));
-    let part = match step {
-        Step::Python => "configurar o ambiente",
-        Step::AppCode => "instalar os arquivos do aplicativo",
-        Step::Dependencies => "instalar os componentes",
-        Step::Models => "baixar os modelos de IA",
-        Step::VirtualCamera => "ativar a câmera virtual",
-    };
-    let network = ["timed out", "dns", "connection", "conex", "network", "rede", "HTTP"]
-        .iter()
-        .any(|k| technical.to_lowercase().contains(&k.to_lowercase()));
-    let hint = if network {
-        " Verifique a conexão com a internet e clique em Tentar de novo."
-    } else {
-        " Clique em Tentar de novo; o que já foi baixado é aproveitado."
-    };
-    format!("Não foi possível {part}.{hint} Detalhes em Ver log.")
-}
-
+/// No macOS abre pelo atalho, para o pedido de câmera ser feito em nome dele
+/// (ver platform::create_app_shortcuts); o próprio atalho mostra um erro se
+/// o app não abrir. Sem atalho (ou no Windows), abre direto e espera a
+/// janela aparecer, devolvendo o erro à UI se o app não abrir.
 #[tauri::command]
-async fn run_install(app: AppHandle) -> Result<InstallResult, String> {
-    let rep = Reporter::new(app.clone());
-    rep.log("=== instalação iniciada ===");
-
-    // Espaço em disco ANTES de baixar qualquer byte.
-    if let Ok(free) = steps::free_disk_bytes() {
-        let needed = steps::required_bytes();
-        if free < needed {
-            let msg = format!(
-                "Espaço insuficiente: {:.1} GB livres, {:.1} GB necessários",
-                free as f64 / 1e9,
-                needed as f64 / 1e9
-            );
-            rep.failed(Step::Python, &msg);
-            return Err(msg);
-        }
+async fn open_app(app: AppHandle) -> Result<(), String> {
+    if platform::open_launcher_bundle()? {
+        app.exit(0);
+        return Ok(());
     }
-
-    std::fs::create_dir_all(paths::root()?).map_err(|e| e.to_string())?;
-
-    let client = reqwest::Client::builder()
-        .user_agent("DeepfakeStudioLive-Installer")
-        .build()
-        .map_err(|e| format!("não consegui iniciar o cliente HTTP: {e}"))?;
-
-    // 1. Python
-    if let Err(e) = steps::ensure_python(&client, &rep).await {
-        let msg = friendly_failure(&rep, Step::Python, &e);
-        rep.failed(Step::Python, &msg);
-        return Err(msg);
-    }
-
-    // 2. Código do app — antes das dependências, porque o venv mora dentro
-    //    de app/ e o requirements.txt vem daqui.
-    //
-    //    Rodando de dentro do repositório (desenvolvimento), copia dali.
-    //    Numa máquina limpa não há repositório, e aí baixa o Release — que
-    //    é público, então não precisa de token.
-    let result = match source_dir() {
-        Ok(source) => {
-            rep.log(&format!("usando código local de {}", source.display()));
-            steps::ensure_app_code(&rep, &source)
-        }
-        Err(_) => {
-            rep.log("sem código local; baixando do Release");
-            steps::fetch_app_code(&client, &rep).await
-        }
-    };
-    if let Err(e) = result {
-        let msg = friendly_failure(&rep, Step::AppCode, &e);
-        rep.failed(Step::AppCode, &msg);
-        return Err(msg);
-    }
-
-    // 3. Dependências
-    if let Err(e) = steps::ensure_dependencies(&client, &rep).await {
-        let msg = friendly_failure(&rep, Step::Dependencies, &e);
-        rep.failed(Step::Dependencies, &msg);
-        return Err(msg);
-    }
-
-    // 4. Modelos
-    if let Err(e) = steps::ensure_models(&client, &rep).await {
-        let msg = friendly_failure(&rep, Step::Models, &e);
-        rep.failed(Step::Models, &msg);
-        return Err(msg);
-    }
-
-    // 5. Câmera virtual — degradada em vez de fatal.
-    steps::ensure_virtual_camera(&rep)?;
-
-    // Checa o acelerador: a queda para CPU não dá erro, então sem isto uma
-    // instalação com CUDA quebrado parece perfeita e só se revela na
-    // lentidão.
-    let accelerator = match launch::detect_execution_provider() {
-        Ok(providers) => {
-            rep.log(&format!("providers disponíveis: {providers}"));
-            if providers.contains("CUDAExecutionProvider") {
-                "CUDA".to_string()
-            } else if providers.contains("DmlExecutionProvider") {
-                "DirectML".to_string()
-            } else {
-                "CPU".to_string()
-            }
-        }
-        Err(e) => {
-            rep.log(&format!("não consegui checar o acelerador: {e}"));
-            "desconhecido".to_string()
-        }
-    };
-
-    // Atalhos que abrem o app direto. Falhar aqui não invalida a instalação:
-    // o app funciona, só o caminho até ele é menos conveniente.
-    let shortcuts = match shortcuts::create_app_shortcuts() {
-        Ok(dirs) => {
-            rep.log(&format!("atalhos criados em: {}", dirs.join(", ")));
-            dirs
-        }
-        Err(e) => {
-            rep.log(&format!("não consegui criar os atalhos: {e}"));
-            Vec::new()
-        }
-    };
-
-    rep.log("=== instalação concluída ===");
-    Ok(InstallResult { accelerator, shortcuts })
-}
-
-#[tauri::command]
-fn open_app(app: AppHandle) -> Result<u32, String> {
-    let pid = launch::launch_app()?;
-    // O instalador já cumpriu o papel: deixar a janela aberta atrás do app
-    // só confunde (e é o motivo de o usuário achar que "abriu o instalador").
+    tauri::async_runtime::spawn_blocking(|| launch::launch_app(launch::AfterReady::Return))
+        .await
+        .map_err(|e| format!("falha interna ao abrir o app: {e}"))??;
     app.exit(0);
-    Ok(pid)
-}
-
-/// Modo `--launch`, usado pelos atalhos "Deepfake Studio Live": abre o app e
-/// sai, sem criar nenhuma janela do instalador. Um erro vira uma caixa de
-/// mensagem, porque neste modo não há UI nem console para mostrá-lo.
-fn launch_and_exit() -> ! {
-    match launch::launch_app() {
-        Ok(_) => std::process::exit(0),
-        Err(e) => {
-            show_error("Deepfake Studio Live", &format!("Não consegui abrir o aplicativo.
-
-{e}
-
-Abra o \"Deepfake Studio Live Installer\" e clique em Instalar para reparar."));
-            std::process::exit(1);
-        }
-    }
-}
-
-#[cfg(windows)]
-fn show_error(title: &str, text: &str) {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
-    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
-    let (title, text) = (wide(title), wide(text));
-    unsafe {
-        MessageBoxW(std::ptr::null_mut(), text.as_ptr(), title.as_ptr(), MB_OK | MB_ICONERROR);
-    }
-}
-
-#[cfg(not(windows))]
-fn show_error(title: &str, text: &str) {
-    eprintln!("{title}: {text}");
+    Ok(())
 }
 
 /// Recria os atalhos de uma instalação que já existe. Chamado pela UI quando
 /// abre já instalado: quem instalou antes de os atalhos existirem (ou os
-/// apagou) os recebe sem precisar reinstalar nada.
+/// apagou) os recebe sem reinstalar nada. Devolve a frase de onde achá-los.
 #[tauri::command]
-fn ensure_shortcuts() -> Result<Vec<String>, String> {
-    shortcuts::create_app_shortcuts()
+fn ensure_shortcuts() -> Result<String, String> {
+    platform::create_app_shortcuts().map(|_| platform::SHORTCUT_HINT.to_string())
 }
 
 #[tauri::command]
@@ -326,41 +70,63 @@ fn open_log() -> Result<(), String> {
     if !path.exists() {
         return Err("ainda não há log de instalação".into());
     }
-    // Abre pelo shell do Windows em vez de passar o caminho por `cmd /C
-    // start`. O caminho vem de LOCALAPPDATA, não do frontend, mas o cmd
-    // reinterpreta &, ^, % e aspas no que recebe — um perfil de usuário com
-    // um desses caracteres bastaria para o comando fazer outra coisa.
-    // ShellExecuteW recebe o caminho como argumento, sem passar por parser
-    // de linha de comando.
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        let wide: Vec<u16> = path
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-        let verb: Vec<u16> = "open\0".encode_utf16().collect();
-        let result = unsafe {
-            windows_sys::Win32::UI::Shell::ShellExecuteW(
-                std::ptr::null_mut(),
-                verb.as_ptr(),
-                wide.as_ptr(),
-                std::ptr::null(),
-                std::ptr::null(),
-                windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
-            )
-        };
-        // ShellExecuteW devolve > 32 em sucesso; abaixo disso é código de erro.
-        if (result as isize) <= 32 {
-            return Err("não consegui abrir o log".into());
+    platform::open_path(&path)
+}
+
+/// Modo launcher: abre o app e sai, sem criar nenhuma janela do instalador.
+/// Um erro vira um alerta do sistema, porque neste modo não há UI nem
+/// console para mostrá-lo.
+fn launch_and_exit() -> ! {
+    // No macOS o launcher fica vivo enquanto o app roda (ver AfterReady).
+    let after_ready = if cfg!(target_os = "macos") {
+        launch::AfterReady::WaitForExit
+    } else {
+        launch::AfterReady::Return
+    };
+    match launch::launch_app(after_ready) {
+        Ok(_) => std::process::exit(0),
+        Err(e) => {
+            platform::show_error(
+                "Deepfake Studio Live",
+                &format!(
+                    "Não consegui abrir o aplicativo.\n\n{e}\n\nAbra o instalador do Deepfake Studio Live e clique em Instalar para reparar."
+                ),
+            );
+            std::process::exit(1);
         }
     }
-    Ok(())
+}
+
+/// Modo `--install-headless`: a mesma instalação da janela, com o progresso
+/// no terminal. Usado pelo CI para instalar do zero em máquinas limpas.
+fn install_headless() -> ! {
+    platform::attach_parent_console();
+    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("não consegui iniciar o runtime: {e}");
+            std::process::exit(1);
+        }
+    };
+    let rep = Reporter::terminal();
+    match runtime.block_on(install::run(&rep)) {
+        Ok(result) => {
+            println!("INSTALL OK accelerator={} shortcuts={:?}", result.accelerator, result.shortcuts);
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("INSTALL FAILED: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn main() {
-    if std::env::args().any(|a| a == "--launch") {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--install-headless") {
+        install_headless();
+    }
+    if args.iter().any(|a| a == "--launch") || platform::is_launcher_invocation() {
         launch_and_exit();
     }
 
@@ -375,13 +141,7 @@ fn main() {
         .setup(|app| {
             // Estado inicial da lista de passos, para a UI não começar vazia.
             let rep = Reporter::new(app.handle().clone());
-            for step in [
-                Step::Python,
-                Step::Dependencies,
-                Step::AppCode,
-                Step::Models,
-                Step::VirtualCamera,
-            ] {
+            for step in [Step::Python, Step::Dependencies, Step::AppCode, Step::Models, Step::VirtualCamera] {
                 rep.update(StepUpdate {
                     step,
                     state: StepState::Pending,

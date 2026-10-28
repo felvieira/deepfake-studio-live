@@ -432,8 +432,8 @@ if (initial) {
     go.textContent = "Abrir";
     setStatus("Já instalado em " + initial.root);
     invoke("ensure_shortcuts")
-      .then((dirs) => {
-        if (dirs.length) setStatus('Já instalado. Atalho "Deepfake Studio Live" na Área de Trabalho e no Menu Iniciar.');
+      .then((hint) => {
+        if (hint) setStatus(`Já instalado. ${hint}`);
       })
       .catch(() => {});
   } else {
@@ -445,7 +445,9 @@ if (initial) {
 go.addEventListener("click", async () => {
   if (go.textContent === "Abrir") {
     go.disabled = true;
-    setStatus("Iniciando o aplicativo…");
+    // O instalador só se fecha quando a janela do app aparece de verdade;
+    // a primeira abertura carrega bastante coisa.
+    setStatus("Abrindo o aplicativo… a primeira vez pode levar até um minuto.");
     try {
       // Em sucesso o instalador se fecha sozinho: não há mais o que fazer aqui.
       await invoke("open_app");
@@ -464,21 +466,21 @@ go.addEventListener("click", async () => {
   renderOverall();
   setStatus("Iniciando a instalação…");
   try {
-    const { accelerator, shortcuts } = await invoke("run_install");
+    const { accelerator, shortcut_hint } = await invoke("run_install");
     installStartedAt = null;
     go.disabled = false;
     go.textContent = "Abrir";
     const total = fmtTime(Date.now() - (info["python"].started ?? Date.now()));
     overallBar.style.width = "100%";
     overallCount.textContent = "100%";
-    const where = shortcuts.length
-      ? ' Use o atalho "Deepfake Studio Live" na Área de Trabalho ou no Menu Iniciar.'
-      : "";
-    // Sem nomes técnicos (CUDA, DirectML): só se a placa de vídeo será usada.
+    const where = shortcut_hint ? ` ${shortcut_hint}` : "";
+    // Sem nomes técnicos (CUDA, CoreML, DirectML): só se há aceleração.
     if (accelerator === "CPU") {
       setStatus(`Instalado em ${total}. Vai rodar no processador — nenhuma placa de vídeo compatível foi encontrada.${where}`, "");
     } else if (accelerator === "CUDA" || accelerator === "DirectML") {
       setStatus(`Instalado em ${total}, com aceleração pela placa de vídeo.${where}`, "ok");
+    } else if (accelerator === "CoreML") {
+      setStatus(`Instalado em ${total}, com aceleração pelo chip Apple.${where}`, "ok");
     } else {
       setStatus(`Instalado em ${total}.${where}`, "ok");
     }

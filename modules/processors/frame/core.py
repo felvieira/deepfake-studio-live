@@ -11,6 +11,7 @@ from tqdm import tqdm
 
 import modules
 import modules.globals
+from modules.ffmpeg_tools import ffmpeg_command
 from modules.face_analyser import get_one_face
 
 FRAME_PROCESSORS_MODULES: List[ModuleType] = []
@@ -183,6 +184,20 @@ def process_video_in_memory(source_path: str, target_path: str, fps: float) -> b
                 '-preset', 'p4', '-tune', 'hq', '-rc', 'vbr',
                 '-cq', str(modules.globals.video_quality), '-b:v', '0',
             ]
+    elif 'CoreMLExecutionProvider' in modules.globals.execution_providers:
+        # Mac: o equivalente ao NVENC é o VideoToolbox. -q:v (1–100, maior =
+        # melhor) faz o papel do CRF; -allow_sw deixa o próprio VideoToolbox
+        # usar o codificador de software quando não há hardware (máquinas
+        # virtuais). Se ainda assim falhar, cai para o libx264 abaixo.
+        vt_quality = str(max(1, min(100, 100 - 2 * int(modules.globals.video_quality))))
+        if encoder == 'libx264':
+            encoder = 'h264_videotoolbox'
+            is_hw_encoder = True
+            encoder_options = ['-q:v', vt_quality, '-allow_sw', '1']
+        elif encoder == 'libx265':
+            encoder = 'hevc_videotoolbox'
+            is_hw_encoder = True
+            encoder_options = ['-q:v', vt_quality, '-allow_sw', '1', '-tag:v', 'hvc1']
     elif 'DmlExecutionProvider' in modules.globals.execution_providers:
         if encoder == 'libx264':
             encoder = 'h264_amf'
@@ -272,7 +287,7 @@ def _run_pipe_pipeline(
 
     # --- Reader: decode source video to raw BGR24 on stdout ---
     reader_cmd = [
-        'ffmpeg', '-hide_banner',
+        ffmpeg_command(), '-hide_banner',
         '-hwaccel', 'auto',
         '-i', target_path,
         '-f', 'rawvideo',
@@ -283,7 +298,7 @@ def _run_pipe_pipeline(
 
     # --- Writer: encode raw BGR24 from stdin ---
     writer_cmd = [
-        'ffmpeg', '-hide_banner',
+        ffmpeg_command(), '-hide_banner',
         '-f', 'rawvideo',
         '-pix_fmt', 'bgr24',
         '-s', f'{width}x{height}',

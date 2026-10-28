@@ -17,7 +17,6 @@ import sys
 import tempfile
 import threading
 import time
-import webbrowser
 from typing import Callable, List, Optional, Tuple
 
 import cv2
@@ -28,6 +27,17 @@ try:
 except ImportError:
     pyvirtualcam = None
 
+# Câmera virtual de cada sistema. O pyvirtualcam fala com um driver que já
+# precisa existir: no Windows o Unity Capture (o instalador registra), no
+# macOS a câmera virtual do OBS Studio (precisa do OBS instalado e da câmera
+# virtual ativada uma vez nele), no Linux o v4l2loopback.
+if sys.platform == "win32":
+    _VIRTUAL_CAMERA_BACKEND, _VIRTUAL_CAMERA_NAME = "unitycapture", "Unity Video Capture"
+elif sys.platform == "darwin":
+    _VIRTUAL_CAMERA_BACKEND, _VIRTUAL_CAMERA_NAME = "obs", "OBS Virtual Camera"
+else:
+    _VIRTUAL_CAMERA_BACKEND, _VIRTUAL_CAMERA_NAME = "v4l2loopback", "v4l2loopback"
+
 from PIL import Image, ImageOps
 from contextlib import contextmanager
 
@@ -35,14 +45,13 @@ from PySide6.QtCore import (
     QEasingCurve,
     QObject,
     QRectF,
-    QSize,
     QThread,
     QTimer,
     QVariantAnimation,
     Qt,
     Signal,
 )
-from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap
+from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractButton,
     QApplication,
@@ -67,6 +76,8 @@ from PySide6.QtWidgets import (
 
 import modules.globals
 import modules.metadata
+from modules import splash
+from modules.branding import brand_file, get_application
 from modules.gpu_memory import models_loaded, unload_models
 from modules.capturer import get_video_frame, get_video_frame_total
 from modules.face_analyser import (
@@ -512,7 +523,20 @@ def get_available_cameras() -> Tuple[List[int], List[str]]:
             return [], ["No cameras found"]
 
     if platform.system() == "Darwin":
-        return [0, 1], ["Camera 0", "Camera 1"]
+        # cv2_enumerate_cameras usa o AVFoundation e numera as câmeras na
+        # mesma ordem que o OpenCV (ordenadas pelo uniqueID), então o índice
+        # serve direto para cv2.VideoCapture. Antes eram dois nomes fixos
+        # ("Camera 0", "Camera 1"), existindo ou não.
+        try:
+            from cv2_enumerate_cameras import enumerate_cameras
+
+            cameras = enumerate_cameras(cv2.CAP_AVFOUNDATION)
+            if cameras:
+                return [c.index for c in cameras], [c.name for c in cameras]
+            return [], ["No cameras found"]
+        except Exception as exc:
+            print(f"Error detecting cameras: {exc}")
+            return [0, 1], ["Camera 0", "Camera 1"]
 
     # Linux probe
     indices: List[int] = []
@@ -529,49 +553,10 @@ def get_available_cameras() -> Tuple[List[int], List[str]]:
 # ─── branding ────────────────────────────────────────────────────────────
 
 
-_ICON_SIZES = (16, 32, 48, 64, 128, 256, 512)
-
-
-def _load_app_icon() -> QIcon:
-    """Ícone do app, montado com todos os tamanhos de media/brand/.
-
-    Vários tamanhos deixam o Windows escolher o nítido para cada lugar
-    (barra de título, barra de tarefas, Alt+Tab) em vez de reduzir um só.
-    Faltar arquivo não é erro: o app abre com o ícone padrão do Qt.
-    """
-    icon = QIcon()
-    brand_dir = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "media", "brand"
-    )
-    for size in _ICON_SIZES:
-        path = os.path.join(brand_dir, f"icon-{size}.png")
-        if os.path.isfile(path):
-            icon.addFile(path, QSize(size, size))
-    return icon
-
-
 def _chevron_path() -> str:
     """Caminho (com '/') do chevron usado na seta dos combos; o QSS só
     aceita url() com barras normais, mesmo no Windows."""
-    return os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "media", "brand", "chevron-down.svg",
-    ).replace("\\", "/")
-
-
-def _set_windows_app_id() -> None:
-    """Sem um AppUserModelID próprio, o Windows agrupa a janela sob o
-    python.exe e mostra o ícone dele na barra de tarefas."""
-    if sys.platform != "win32":
-        return
-    try:
-        import ctypes
-
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-            modules.metadata.app_id
-        )
-    except (AttributeError, OSError):
-        pass
+    return brand_file("chevron-down.svg").replace("\\", "/")
 
 
 # ─── main window ─────────────────────────────────────────────────────────
@@ -815,7 +800,8 @@ def _detect_gpu_name() -> str:
     """Nome da placa de vídeo principal, ou "" se não achar nenhuma.
 
     nvidia-smi responde em ~100 ms e dá o nome exato; para AMD/Intel cai
-    para o WMI. Roda numa thread (ver _GpuProbe): o WMI leva ~1 s.
+    para o WMI; no Mac é o nome do chip. Roda numa thread (ver _GpuProbe):
+    o WMI leva ~1 s.
     """
     import subprocess
 
@@ -830,6 +816,10 @@ def _detect_gpu_name() -> str:
         except (OSError, subprocess.SubprocessError):
             return ""
 
+    if sys.platform == "darwin":
+        # Nos Macs com chip Apple a GPU faz parte do chip: o nome dele
+        # ("Apple M4 Pro") é o que interessa mostrar.
+        return run(["sysctl", "-n", "machdep.cpu.brand_string"])
     name = run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"])
     if name:
         return name.splitlines()[0].strip()
@@ -1221,7 +1211,7 @@ class MainWindow(QMainWindow):
         output_layout.addWidget(self.sw_virtual_camera)
         output_row = QHBoxLayout()
         output_row.addWidget(QLabel(_("Output device")))
-        self.output_device_label = QLabel("Unity Video Capture")
+        self.output_device_label = QLabel(_VIRTUAL_CAMERA_NAME)
         self.output_device_label.setObjectName("outputDevice")
         output_row.addWidget(self.output_device_label, 1)
         output_layout.addLayout(output_row)
@@ -1231,7 +1221,7 @@ class MainWindow(QMainWindow):
         setup_layout.addWidget(output)
         grid.addWidget(setup, 0, 1)
 
-        flow = QLabel(_("Input webcam  →  Face processing  →  Unity Video Capture"))
+        flow = QLabel(_("Input webcam  →  Face processing  →  ") + _VIRTUAL_CAMERA_NAME)
         flow.setObjectName("flowHint")
         grid.addWidget(flow, 1, 0, 1, 2)
 
@@ -2009,7 +1999,7 @@ class _ProcessingWorker(QThread):
 
 
 class _VirtualCameraWorker(QThread):
-    """Publishes processed frames through the UnityCapture device."""
+    """Publishes processed frames through the system's virtual camera."""
 
     def __init__(
         self,
@@ -2036,7 +2026,7 @@ class _VirtualCameraWorker(QThread):
                 height=self._height,
                 fps=self._fps,
                 fmt=pyvirtualcam.PixelFormat.RGB,
-                backend="unitycapture",
+                backend=_VIRTUAL_CAMERA_BACKEND,
             ) as camera:
                 update_status(f"Virtual camera active: {camera.device}")
                 while not self._stop.is_set():
@@ -2053,7 +2043,14 @@ class _VirtualCameraWorker(QThread):
                     camera.send(cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB))
                     camera.sleep_until_next_frame()
         except Exception as exc:
-            update_status(f"Virtual camera unavailable: {exc}")
+            print(f"[virtual camera] {exc}")
+            if sys.platform == "darwin":
+                update_status(
+                    "Virtual camera unavailable: install OBS Studio and start its "
+                    "virtual camera once."
+                )
+            else:
+                update_status(f"Virtual camera unavailable: {exc}")
 
 class WebcamPreviewWindow(QWidget):
     def __init__(self, camera_index: int):
@@ -2453,7 +2450,31 @@ class _Window:
 
     def mainloop(self) -> None:
         self._main.show()
+        splash.close(self._main)
+        _signal_ready(self._app)
         self._app.exec()
+
+
+def _signal_ready(app: QApplication) -> None:
+    """Avisa quem abriu o app que a janela apareceu de verdade.
+
+    O launcher do instalador (e o atalho) passa um caminho em
+    DSL_READY_FILE e espera esse arquivo aparecer antes de considerar o app
+    aberto; se o processo terminar antes, mostra o erro. Sem isso, um app
+    que morria durante a carga ainda era dado como "iniciado".
+
+    DSL_EXIT_AFTER_READY=1 fecha o app logo depois — usado pelo teste de
+    abertura no CI.
+    """
+    ready_file = os.environ.get("DSL_READY_FILE")
+    if ready_file:
+        try:
+            with open(ready_file, "w", encoding="utf-8") as handle:
+                handle.write(str(os.getpid()))
+        except OSError as exc:
+            print(f"[ui] could not write the ready file: {exc}")
+    if os.environ.get("DSL_EXIT_AFTER_READY") == "1":
+        QTimer.singleShot(1500, app.quit)
 
 
 def init(
@@ -2462,13 +2483,7 @@ def init(
     global _APP, _MAIN, _PREVIEW, _LANG, _BRIDGE
 
     _LANG = LanguageManager(lang)
-    _set_windows_app_id()
-    if QApplication.instance() is None:
-        _APP = QApplication(sys.argv)
-    else:
-        _APP = QApplication.instance()
-    _APP.setApplicationName(modules.metadata.name)
-    _APP.setWindowIcon(_load_app_icon())
+    _APP = get_application()
     _APP.setStyleSheet(QSS.replace("__CHEVRON__", _chevron_path()))
 
     _BRIDGE = _UIBridge()

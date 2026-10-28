@@ -90,6 +90,14 @@ if sys.platform.startswith("linux"):
                     pass
         break
 
+# Tela de carregamento antes dos imports pesados (onnxruntime, OpenCV,
+# insightface), que levam de 5 a 30 s — ver modules/splash.py.
+if __name__ == '__main__' and not any(
+    arg in sys.argv for arg in ('-s', '--source', '-t', '--target', '-o', '--output', '-h', '--help')
+):
+    from modules import splash
+    splash.show()
+
 from modules import platform_info
 platform_info.print_banner()
 

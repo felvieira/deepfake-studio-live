@@ -17,3 +17,5 @@ keras>=3.0.0
 protobuf>=6.33.5,<8
 pygrabber; sys_platform == 'win32'
 pyvirtualcam>=0.15.0
+# ffmpeg embutido para cada sistema (o app usa o do PATH quando existe; ver modules/ffmpeg_tools.py)
+imageio-ffmpeg==0.6.0

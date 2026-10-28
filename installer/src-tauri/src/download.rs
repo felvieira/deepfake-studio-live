@@ -7,6 +7,7 @@
 //! um .onnx truncado que o app tentaria carregar depois.
 
 use futures_util::StreamExt;
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use tokio::io::AsyncWriteExt;
 
@@ -16,6 +17,30 @@ pub struct DownloadSpec<'a> {
     /// Tamanho esperado em bytes. Usado para validar o resultado e para a
     /// barra de progresso saber o total antes do servidor responder.
     pub expected_size: Option<u64>,
+    /// SHA256 esperado (hex). Para os binários fixados por versão (o
+    /// Python): o arquivo final só é aceito se bater, inclusive um que já
+    /// estava no disco de uma tentativa anterior.
+    pub sha256: Option<&'a str>,
+}
+
+/// Confere o SHA256 de `path`; em caso de divergência apaga o arquivo, para a
+/// próxima tentativa baixar de novo em vez de reaproveitar o corrompido.
+fn verify_sha256(path: &Path, expected: &str) -> Result<(), String> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| format!("não consegui abrir {}: {e}", path.display()))?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)
+        .map_err(|e| format!("não consegui ler {}: {e}", path.display()))?;
+    let actual: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    if actual.eq_ignore_ascii_case(expected) {
+        return Ok(());
+    }
+    drop(file);
+    let _ = std::fs::remove_file(path);
+    Err(format!(
+        "o arquivo baixado de {} está corrompido (checksum {actual}, esperado {expected}); rode a instalação de novo",
+        path.display()
+    ))
 }
 
 /// Baixa `spec.url` para `spec.target`, retomando um `.part` existente.
@@ -37,12 +62,15 @@ where
     // Já está lá e com o tamanho certo? Não baixa de novo — é o que torna
     // a reexecução depois de uma falha barata.
     if let Ok(meta) = tokio::fs::metadata(spec.target).await {
-        if let Some(expected) = spec.expected_size {
-            if meta.len() == expected {
-                on_progress(expected, expected);
-                return Ok(expected);
-            }
-        } else if meta.len() > 0 {
+        let complete = match spec.expected_size {
+            Some(expected) => meta.len() == expected,
+            None => meta.len() > 0,
+        };
+        let intact = match spec.sha256 {
+            Some(sha) if complete => verify_sha256(spec.target, sha).is_ok(),
+            _ => complete,
+        };
+        if intact {
             on_progress(meta.len(), meta.len());
             return Ok(meta.len());
         }
@@ -134,6 +162,10 @@ where
                  rode a instalação de novo para retomar"
             ));
         }
+    }
+
+    if let Some(sha) = spec.sha256 {
+        verify_sha256(&partial, sha)?;
     }
 
     tokio::fs::rename(&partial, spec.target)

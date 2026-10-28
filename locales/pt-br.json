@@ -67,5 +67,10 @@
     "Live stopped. GPU memory released.": "Live parado. Memória da GPU liberada.",
     "Live stopped.": "Live parado.",
     "Keep models in GPU memory after stopping": "Manter os modelos na memória da GPU após parar",
-    "Restarts faster, but keeps using GPU memory until you close the app": "Reinicia mais rápido, mas continua ocupando a GPU até fechar o app"
+    "Restarts faster, but keeps using GPU memory until you close the app": "Reinicia mais rápido, mas continua ocupando a GPU até fechar o app",
+    "Loading…": "Carregando…",
+    "The app could not start:": "O aplicativo não conseguiu iniciar:",
+    "ffmpeg is not installed.": "Faltam componentes de vídeo (ffmpeg). Reinstale o Deepfake Studio Live pelo instalador.",
+    "Input webcam  →  Face processing  →  ": "Webcam  →  Troca de rosto  →  ",
+    "Virtual camera unavailable: install OBS Studio and start its virtual camera once.": "Câmera virtual indisponível: instale o OBS Studio e ative a câmera virtual uma vez nele."
 }

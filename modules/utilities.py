@@ -11,6 +11,7 @@ from typing import List, Any
 from tqdm import tqdm
 
 import modules.globals
+from modules.ffmpeg_tools import ffmpeg_command, ffprobe_path
 
 TEMP_FILE = "temp.mp4"
 TEMP_DIRECTORY = "temp"
@@ -19,7 +20,7 @@ TEMP_DIRECTORY = "temp"
 def run_ffmpeg(args: List[str]) -> bool:
     """Run ffmpeg with hardware acceleration and optimized settings."""
     commands = [
-        "ffmpeg",
+        ffmpeg_command(),
         "-hide_banner",
         "-hwaccel", "auto",  # Auto-detect hardware acceleration
         "-hwaccel_output_format", "auto",  # Use hardware format when possible
@@ -39,25 +40,45 @@ def run_ffmpeg(args: List[str]) -> bool:
     return False
 
 
-def detect_fps(target_path: str) -> float:
-    command = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-select_streams",
-        "v:0",
-        "-show_entries",
-        "stream=r_frame_rate",
-        "-of",
-        "default=noprint_wrappers=1:nokey=1",
-        target_path,
-    ]
-    output = subprocess.check_output(command).decode().strip().split("/")
+def _opencv_video_property(target_path: str, prop: int) -> float:
+    """Lê uma propriedade do vídeo pelo OpenCV — usado quando não há ffprobe
+    (o ffmpeg que vem pelo pip não o inclui; ver modules.ffmpeg_tools)."""
+    import cv2
+
+    capture = cv2.VideoCapture(target_path)
     try:
-        numerator, denominator = map(int, output)
-        return numerator / denominator
-    except Exception:
-        pass
+        return float(capture.get(prop)) if capture.isOpened() else 0.0
+    finally:
+        capture.release()
+
+
+def detect_fps(target_path: str) -> float:
+    ffprobe = ffprobe_path()
+    if ffprobe:
+        command = [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=r_frame_rate",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            target_path,
+        ]
+        try:
+            output = subprocess.check_output(command).decode().strip().split("/")
+            numerator, denominator = map(int, output)
+            return numerator / denominator
+        except Exception:
+            pass
+    else:
+        import cv2
+
+        fps = _opencv_video_property(target_path, cv2.CAP_PROP_FPS)
+        if fps > 0:
+            return fps
     return 30.0
 
 
@@ -322,9 +343,18 @@ def resolve_relative_path(path: str) -> str:
 
 
 def get_video_dimensions(target_path: str) -> tuple:
-    """Get video width and height using ffprobe."""
+    """Get video width and height using ffprobe (or OpenCV without it)."""
+    ffprobe = ffprobe_path()
+    if not ffprobe:
+        import cv2
+
+        width = int(_opencv_video_property(target_path, cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(_opencv_video_property(target_path, cv2.CAP_PROP_FRAME_HEIGHT))
+        if width <= 0 or height <= 0:
+            raise ValueError(f"could not read the video size of {target_path}")
+        return width, height
     command = [
-        "ffprobe", "-v", "error",
+        ffprobe, "-v", "error",
         "-select_streams", "v:0",
         "-show_entries", "stream=width,height",
         "-of", "csv=p=0:s=x",
@@ -339,8 +369,13 @@ def estimate_frame_count(target_path: str, fps: float = None) -> int:
     """Estimate total frame count from video duration and fps."""
     if fps is None:
         fps = detect_fps(target_path)
+    ffprobe = ffprobe_path()
+    if not ffprobe:
+        import cv2
+
+        return int(_opencv_video_property(target_path, cv2.CAP_PROP_FRAME_COUNT))
     command = [
-        "ffprobe", "-v", "error",
+        ffprobe, "-v", "error",
         "-show_entries", "format=duration",
         "-of", "csv=p=0",
         target_path,

@@ -58,9 +58,18 @@ pub struct StepUpdate {
     pub bytes: Option<(u64, u64)>,
 }
 
+/// Para onde vão as atualizações: a janela do instalador, ou o terminal no
+/// modo `--install-headless` (CI e quem prefere instalar pela linha de
+/// comando). Nos dois casos tudo também vai para o install.log.
+#[derive(Clone)]
+enum Sink {
+    Window(AppHandle),
+    Terminal,
+}
+
 #[derive(Clone)]
 pub struct Reporter {
-    app: AppHandle,
+    sink: Sink,
     throttle: Arc<Mutex<Throttle>>,
 }
 
@@ -76,8 +85,17 @@ struct Throttle {
 
 impl Reporter {
     pub fn new(app: AppHandle) -> Self {
+        Self::with_sink(Sink::Window(app))
+    }
+
+    /// Sem janela: cada linha do log também sai no terminal.
+    pub fn terminal() -> Self {
+        Self::with_sink(Sink::Terminal)
+    }
+
+    fn with_sink(sink: Sink) -> Self {
         Self {
-            app,
+            sink,
             throttle: Arc::new(Mutex::new(Throttle {
                 last_emit: Instant::now() - Duration::from_secs(1),
                 last_decile: -1,
@@ -89,8 +107,11 @@ impl Reporter {
     /// Emite sem gravar no log (o chamador decide o que merece uma linha).
     fn emit(&self, update: &StepUpdate) {
         // Um erro de emit significa que a janela sumiu; a instalação
-        // continua e o log guarda o resto.
-        let _ = self.app.emit("install:step", update);
+        // continua e o log guarda o resto. No terminal, o que importa já
+        // sai pelas linhas do log (ver log()).
+        if let Sink::Window(app) = &self.sink {
+            let _ = app.emit("install:step", update);
+        }
     }
 
     /// Uma linha de detalhe do que está acontecendo AGORA dentro de uma
@@ -226,6 +247,9 @@ impl Reporter {
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
             let _ = writeln!(file, "{stamp} {line}");
+        }
+        if matches!(self.sink, Sink::Terminal) {
+            println!("{line}");
         }
     }
 }

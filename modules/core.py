@@ -26,6 +26,8 @@ except ImportError:
 import modules.globals
 import modules.metadata
 import modules.ui as ui
+from modules.ffmpeg_tools import ffmpeg_path
+from modules.gettext import LanguageManager, system_language
 from modules.processors.frame.core import get_frame_processors_modules, process_video_in_memory
 from modules.utilities import has_image_extension, is_image, is_video, detect_fps, create_video, extract_frames, get_temp_frame_paths, restore_audio, create_temp, move_temp, clean_temp, normalize_output_path
 
@@ -53,7 +55,7 @@ def parse_args() -> None:
     program.add_argument('--mouth-mask', help='mask the mouth region', dest='mouth_mask', action='store_true', default=False)
     program.add_argument('--video-encoder', help='adjust output video encoder', dest='video_encoder', default='libx264', choices=['libx264', 'libx265', 'libvpx-vp9'])
     program.add_argument('--video-quality', help='adjust output video quality', dest='video_quality', type=int, default=18, choices=range(52), metavar='[0-51]')
-    program.add_argument('-l', '--lang', help='Ui language', default="en")
+    program.add_argument('-l', '--lang', help='Ui language (default: the system language)', default=None)
     program.add_argument('--live-mirror', help='The live camera display as you see it in the front-facing camera frame', dest='live_mirror', action='store_true', default=False)
     program.add_argument('--live-resizable', help='The live camera frame is resizable', dest='live_resizable', action='store_true', default=False)
     program.add_argument('--max-memory', help='maximum amount of RAM in GB', dest='max_memory', type=int, default=suggest_max_memory())
@@ -88,7 +90,7 @@ def parse_args() -> None:
     modules.globals.max_memory = args.max_memory
     modules.globals.execution_providers = decode_execution_providers(args.execution_provider)
     modules.globals.execution_threads = args.execution_threads
-    modules.globals.lang = args.lang
+    modules.globals.lang = args.lang or system_language()
 
     # The argparse default (None) avoids evaluating suggest_execution_threads()
     # before providers are decoded, and deprecated-arg overrides above may
@@ -201,16 +203,50 @@ def pre_check() -> bool:
     if sys.version_info < (3, 9):
         update_status('Python version is not supported - please upgrade to 3.9 or higher.')
         return False
-    if not shutil.which('ffmpeg'):
+    if not ffmpeg_path():
         update_status('ffmpeg is not installed.')
         return False
     return True
 
 
+_last_status: str = ''
+
+
 def update_status(message: str, scope: str = 'DLC.CORE') -> None:
+    global _last_status
+    _last_status = message
     print(f'[{scope}] {message}')
     if not modules.globals.headless:
         ui.update_status(message)
+
+
+def _abort_startup() -> None:
+    """O app não pode abrir: mostra o motivo e sai com erro.
+
+    Antes, uma checagem que falhava (ffmpeg ausente, modelo que não baixou)
+    só imprimia no terminal e saía com código 0 — aberto por um atalho, o
+    app simplesmente não aparecia e o instalador ainda dizia "iniciado".
+    Agora há uma janela explicando e o código de saída é 1, que o
+    instalador reconhece como falha.
+    """
+    reason = _last_status or 'unknown error'
+    if not modules.globals.headless:
+        from modules import splash
+        splash.close()
+        try:
+            from PySide6.QtWidgets import QApplication, QMessageBox
+
+            app = QApplication.instance() or QApplication(sys.argv)
+            lang = LanguageManager(modules.globals.lang or 'en')
+            QMessageBox.critical(
+                None,
+                modules.metadata.name,
+                f'{lang._("The app could not start:")}\n\n{lang._(reason)}',
+            )
+            del app
+        except Exception as error:  # noqa: BLE001 — sem tela, fica o log
+            print(f'[DLC.CORE] could not show the startup error: {error}')
+    sys.exit(1)
 
 def start() -> None:
     """Start processing with performance monitoring."""
@@ -340,10 +376,10 @@ def destroy(to_quit=True) -> None:
 def run() -> None:
     parse_args()
     if not pre_check():
-        return
+        _abort_startup()
     for frame_processor in get_frame_processors_modules(modules.globals.frame_processors):
         if not frame_processor.pre_check():
-            return
+            _abort_startup()
     # Pre-load face analyser in main thread before GUI starts
     #from modules.face_analyser import get_face_analyser
     #get_face_analyser()
