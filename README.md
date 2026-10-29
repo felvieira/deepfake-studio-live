@@ -30,7 +30,7 @@ What this fork adds:
 |---|---|
 | **Built-in virtual camera** | Upstream tells you to screen-capture the preview window with OBS. Here the processed frames go straight to a virtual camera device that Zoom, Discord, Teams and Meet see as a normal webcam. |
 | **Rebuilt interface** | File and Live are now two clear modes instead of one crowded panel. Advanced options are collapsed by default, so the common path stays short. |
-| **Windows installer** | A 2 MB setup.exe that downloads Python, the dependencies, the models and the driver, with real progress and resume. No terminal, no `pip`. |
+| **Installers for Windows and macOS** | A small installer that downloads everything — its own Python, the dependencies, ffmpeg, the AI models and the virtual camera — with real progress and resume. No terminal, no `pip`. |
 | **Bundled UnityCapture driver** | The driver ships in `third_party/`, so there is nothing extra to hunt down. |
 
 Everything else behaves as upstream. If you want the original project, go there — it is the
@@ -63,63 +63,86 @@ You are responsible for what you make with this. Not the authors of this fork, a
 
 ## Installation
 
-**Windows — installer**
+**Windows 10/11 (64-bit)**
 
 Download [DeepfakeStudioLive-Setup.exe](https://github.com/felvieira/deepfake-studio-live/releases/latest)
-and run it.
+and run it. When it finishes, open the app from the **Deepfake Studio Live** shortcut on the
+Desktop or Start menu.
 
-It handles everything: Python, the dependencies, the ~1.3 GB of AI models and the virtual
-camera driver. Installs to `%LOCALAPPDATA%\DeepLiveCam` and asks for Administrator
-permission only to register the camera — nothing else needs it.
+**macOS 13 or later, Apple Silicon (M1 and newer)**
 
-Every step resumes, so if the download breaks halfway, running it again picks up where it
-stopped. When it finishes it reports which accelerator is active, because a broken CUDA
-setup otherwise shows up only as unexplained slowness.
+1. Download [DeepfakeStudioLive-macOS.dmg](https://github.com/felvieira/deepfake-studio-live/releases/latest),
+   open it and drag the installer to **Applications**.
+2. Open it. The app is not signed by an Apple developer account yet, so the first time macOS
+   blocks it: go to **System Settings → Privacy & Security**, scroll down and click
+   **Open Anyway**. (Or, in Terminal: `xattr -dr com.apple.quarantine "/Applications/Deepfake Studio Live Installer.app"`.)
+3. If the Xcode Command Line Tools are missing, macOS shows its own install window during
+   the setup — confirm it and the installer continues on its own.
+4. When it finishes, open **Deepfake Studio Live** from Applications, Launchpad or Spotlight.
+   macOS asks for camera access the first time you start live mode.
 
-Needs Windows 10/11 64-bit, `ffmpeg` on your PATH and about 4 GB of free disk space.
+**What the installer does (both systems)**
 
-**Windows — from source**
+It downloads its own Python, the dependencies, ffmpeg, the ~1.3 GB of AI models and sets up
+the virtual camera. Nothing is installed system-wide except the virtual camera driver on
+Windows (the only step that asks for Administrator permission). It installs to
+`%LOCALAPPDATA%\DeepLiveCam` on Windows and `~/Library/Application Support/DeepLiveCam` on
+macOS, needs about 10 GB free and an internet connection during setup.
+
+Every step resumes, so if a download breaks halfway, running it again picks up where it
+stopped. When it finishes it tells you whether hardware acceleration is active.
+
+**From source**
+
+Windows (needs Python 3.11–3.13 and the Visual C++ Build Tools):
 
 ```bash
 install.bat
+venv\Scripts\python.exe run.py
 ```
 
-Creates the virtual environment, installs dependencies and registers the driver. The models
-then download on first launch — the window will look frozen while that happens, since
-progress only goes to the terminal.
+macOS / Linux (needs Python 3.11–3.13; on the Mac, also the Xcode Command Line Tools):
 
-**Linux / macOS**
+```bash
+./install.sh
+./run.sh
+```
 
-Follow the [upstream installation guide](https://github.com/hacksider/Deep-Live-Cam#installation-manual).
-The virtual camera in this fork is Windows-only; everything else works.
+ffmpeg comes with the dependencies (`imageio-ffmpeg`); a system ffmpeg on the PATH is used
+instead when present. The models download on first launch.
 
 ---
 
 ## Using the virtual camera
 
-1. Run `python run.py`
-2. Pick **Live camera** mode
-3. Choose a source face image
-4. Turn on **Send video to a virtual camera**
-5. Click **Start live**
-6. In Zoom, Discord, Teams or Meet, select **Unity Video Capture** as your camera
+1. Open the app and pick **Live camera** mode
+2. Choose a source face image
+3. Turn on **Send video to a virtual camera**
+4. Click **Start live**
+5. In Zoom, Discord, Teams or Meet, select the camera:
+   - Windows: **Unity Video Capture** (installed by the installer)
+   - macOS: **OBS Virtual Camera** — install [OBS Studio](https://obsproject.com) (free) and
+     start its virtual camera once inside OBS; macOS asks you to approve it in System Settings.
 
 Restart the calling app if the camera does not appear — most of them enumerate devices once
 at startup.
 
-To remove the driver later: `uninstall_virtual_camera.bat`.
+To remove the Windows driver later: `uninstall_virtual_camera.bat`.
 
 ---
 
 ## GPU acceleration
 
-CUDA, DirectML, OpenVINO and CoreML all work as upstream documents them. See the
-[upstream GPU guide](https://github.com/hacksider/Deep-Live-Cam#gpu-acceleration) for the
-provider-specific install commands.
+- **Windows + NVIDIA:** the installer adds the CUDA libraries automatically.
+- **Mac with Apple Silicon:** CoreML (GPU and Neural Engine) is used automatically; video
+  encoding uses VideoToolbox.
+- DirectML and OpenVINO work as upstream documents them — see the
+  [upstream GPU guide](https://github.com/hacksider/Deep-Live-Cam#gpu-acceleration).
 
-The header shows which accelerator is active. If it says **CPU mode** on a machine with a
-supported GPU, the provider failed to load — usually a CUDA/cuDNN version mismatch. The app
-still runs, just slowly.
+The badge in the top-right corner shows the GPU that was found and whether it is really in
+use. If it says the GPU was found but is **not** in use, the accelerator failed to load and
+the app is running on the CPU — it works, just much slower. **Free GPU memory** (under the
+badge) unloads the models when you are done; stopping live mode does that automatically.
 
 ---
 

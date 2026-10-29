@@ -20,6 +20,15 @@ if errorlevel 1 exit /b 1
 "venv\Scripts\python.exe" -m pip install -r requirements.txt
 if errorlevel 1 exit /b 1
 
+rem Com placa NVIDIA, as bibliotecas CUDA 12 que o onnxruntime-gpu precisa.
+rem Sem elas o app abre normalmente, mas roda na CPU, bem mais devagar.
+where nvidia-smi >nul 2>&1
+if not errorlevel 1 (
+    echo Installing NVIDIA CUDA libraries for GPU acceleration...
+    "venv\Scripts\python.exe" -m pip install nvidia-cuda-runtime-cu12 nvidia-cublas-cu12 nvidia-cudnn-cu12 nvidia-cufft-cu12 nvidia-curand-cu12 nvidia-cuda-nvrtc-cu12
+    if errorlevel 1 exit /b 1
+)
+
 echo [3/3] Installing the Unity Video Capture device...
 call "%~dp0install_virtual_camera.bat"
 if errorlevel 1 (

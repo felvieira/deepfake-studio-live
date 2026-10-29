@@ -1,12 +1,16 @@
 name: Release
 
-# Publica o instalador quando uma tag v* é empurrada.
+# Publica os instaladores quando uma tag v* é empurrada:
 #
-#   git tag v0.1.0 && git push origin v0.1.0
+#   git tag v0.2.0 && git push origin v0.2.0
 #
-# O Release resultante carrega o setup.exe e o tarball do código, que é de
-# onde o próprio instalador baixa o app numa máquina limpa (ver
-# steps::fetch_app_code).
+# O Release carrega o instalador do Windows (.exe), o do macOS (.dmg, Apple
+# Silicon) e o tarball do código — que é de onde o próprio instalador baixa o
+# app numa máquina limpa (ver steps::fetch_app_code).
+#
+# Assinatura no macOS: sem certificado, o app sai com assinatura ad-hoc e o
+# macOS pede para liberar na primeira abertura (README explica). Com os
+# secrets APPLE_* configurados, o Tauri assina e notariza sozinho.
 
 on:
   push:
@@ -19,8 +23,23 @@ permissions:
   contents: write
 
 jobs:
-  installer:
-    runs-on: windows-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            asset: DeepfakeStudioLive-Setup.exe
+          - os: macos-latest
+            asset: DeepfakeStudioLive-macOS.dmg
+    runs-on: ${{ matrix.os }}
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
     steps:
       - uses: actions/checkout@v4
@@ -39,49 +58,70 @@ jobs:
 
       - name: Build installer
         working-directory: installer
-        run: npx --yes @tauri-apps/cli@2 build
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Variáveis vazias (secret não configurado) fariam o Tauri tentar
+          # assinar com nada; sem elas, fica a assinatura ad-hoc da config.
+          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            [ -z "${!v:-}" ] && unset "$v"
+          done
+          npx --yes @tauri-apps/cli@2 build
 
-      # Nome fixo: o link "última versão" do README precisa ser estável, e o
-      # bundle sai com o nome do produto e a versão embutidos.
+      # Nome fixo: o link "última versão" do README precisa ser estável.
       - name: Rename bundle
         shell: bash
         run: |
           set -euo pipefail
-          src=$(find installer/src-tauri/target/release/bundle/nsis -name "*-setup.exe" | head -1)
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            src=$(find installer/src-tauri/target/release/bundle/nsis -name "*-setup.exe" | head -1)
+          else
+            src=$(find installer/src-tauri/target/release/bundle/dmg -name "*.dmg" | head -1)
+          fi
           if [ -z "$src" ]; then
             echo "instalador não foi gerado" >&2
             exit 1
           fi
           mkdir -p dist
-          cp "$src" "dist/DeepfakeStudioLive-Setup.exe"
+          cp "$src" "dist/${{ matrix.asset }}"
           ls -la dist/
 
-      # Sem tag (workflow_dispatch) não há Release para anexar; o artefato
-      # fica disponível na própria execução.
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: installer
-          path: dist/DeepfakeStudioLive-Setup.exe
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
 
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/DeepfakeStudioLive-Setup.exe
+          files: |
+            dist/DeepfakeStudioLive-Setup.exe
+            dist/DeepfakeStudioLive-macOS.dmg
           generate_release_notes: true
           body: |
             ## Instalação
 
-            Baixe `DeepfakeStudioLive-Setup.exe` e execute.
+            **Windows 10/11 (64-bit):** baixe `DeepfakeStudioLive-Setup.exe` e execute.
 
-            O instalador cuida de tudo: Python, dependências, os modelos de
-            IA (~1,3 GB) e o driver da câmera virtual. Instala em
-            `%LOCALAPPDATA%\DeepLiveCam` e não pede privilégio de
-            administrador, exceto para registrar a câmera virtual.
+            **macOS 13 ou mais novo (Apple Silicon — M1 em diante):** baixe
+            `DeepfakeStudioLive-macOS.dmg`, arraste o instalador para
+            Aplicativos e abra. Na primeira vez o macOS pede para liberar o app
+            (veja o README).
 
-            Precisa de Windows 10/11 64-bit, `ffmpeg` no PATH e cerca de
-            4 GB livres em disco.
+            O instalador cuida de tudo: ambiente, componentes, os modelos de IA
+            (~1,3 GB) e a câmera virtual (no Mac, pelo OBS Studio). Precisa de
+            cerca de 10 GB livres e internet durante a instalação.
 
             Leia o [aviso sobre uso responsável](https://github.com/felvieira/deepfake-studio-live#disclaimer)
             antes de usar.
