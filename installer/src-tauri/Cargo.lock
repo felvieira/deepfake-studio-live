@@ -551,7 +551,7 @@ dependencies = [
 
 [[package]]
 name = "deepfake-studio-live-installer"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "flate2",
  "futures-util",

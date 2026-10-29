@@ -452,13 +452,41 @@ pub fn untar_strip_root(archive: &Path, dest: &Path) -> Result<(), String> {
         }
         // Um symlink de uma tentativa anterior faria o unpack falhar.
         if std::fs::symlink_metadata(&target).is_ok() {
-            let _ = std::fs::remove_file(&target);
+            make_room(&target);
         }
         entry
             .unpack(&target)
             .map_err(|e| format!("falha ao extrair {}: {e}", relative.display()))?;
     }
     Ok(())
+}
+
+/// Tira um arquivo existente do caminho para a extração escrever no lugar.
+///
+/// Apagar nem sempre dá: no Windows, uma DLL carregada não pode ser apagada
+/// nem sobrescrita. O filtro da câmera virtual mora em app/ e fica registrado
+/// no sistema, então qualquer programa que liste câmeras (navegador, Zoom,
+/// Teams) o carrega — e uma atualização falhava em
+/// `UnityCaptureFilter64.dll`. Renomear um arquivo em uso é permitido: o nome
+/// antigo fica para quem já o carregou, o novo arquivo assume o caminho
+/// registrado e as sobras são apagadas na próxima atualização.
+fn make_room(target: &Path) {
+    if std::fs::remove_file(target).is_ok() {
+        return;
+    }
+    let mut aside = target.as_os_str().to_owned();
+    aside.push(".dsl-old");
+    let mut aside = PathBuf::from(aside);
+    if aside.exists() && std::fs::remove_file(&aside).is_err() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let mut unique = aside.into_os_string();
+        unique.push(format!("-{stamp}"));
+        aside = PathBuf::from(unique);
+    }
+    let _ = std::fs::rename(target, &aside);
 }
 
 fn copy_tree(from: &Path, to: &Path, skip: &[&str]) -> Result<(), String> {
@@ -552,5 +580,37 @@ mod pip_line_tests {
         assert_eq!(friendly_pip_line("  Using cached foo-1.0-py3-none-any.whl (12 kB)"), None);
         assert_eq!(friendly_pip_line("  Preparing metadata (pyproject.toml): finished with status 'done'"), None);
         assert_eq!(friendly_pip_line(""), None);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod make_room_tests {
+    use super::make_room;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::FreeLibrary;
+    use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
+
+    #[test]
+    fn replaces_a_loaded_dll() {
+        let dir = std::env::temp_dir().join(format!("dsl-make-room-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("filter.dll");
+        let system = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        std::fs::copy(format!(r"{system}\System32\version.dll"), &target).unwrap();
+
+        // Carregada, como o filtro da câmera virtual dentro de um navegador:
+        // apagar falha.
+        let wide: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+        let module = unsafe { LoadLibraryW(wide.as_ptr()) };
+        assert!(!module.is_null());
+        assert!(std::fs::remove_file(&target).is_err());
+
+        make_room(&target);
+        assert!(!target.exists());
+        std::fs::write(&target, b"new").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+
+        unsafe { FreeLibrary(module) };
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
