@@ -25,6 +25,9 @@ pub struct InstallResult {
 #[derive(Serialize)]
 pub struct InstallInfo {
     pub installed: bool,
+    /// Há uma instalação feita por uma versão anterior do instalador: o botão
+    /// vira "Atualizar" (o código e as dependências podem ter mudado).
+    pub update: bool,
     pub root: String,
     /// "windows" ou "macos", para a UI ajustar textos.
     pub os: &'static str,
@@ -45,18 +48,27 @@ pub fn info() -> Result<InstallInfo, String> {
     let root = paths::root()?;
     let python_dir = paths::python_dir()?;
     let deps_marker = platform::site_packages(&python_dir).join("onnxruntime");
-    let installed = deps_marker.exists()
+    let complete = deps_marker.exists()
         && paths::app_dir()?.join("run.py").exists()
         && models::all_present(&paths::models_dir()?)
         && platform::gpu_libs_ready(&python_dir);
+    let same_version = std::fs::read_to_string(version_marker()?)
+        .map(|v| v.trim() == env!("CARGO_PKG_VERSION"))
+        .unwrap_or(false);
     Ok(InstallInfo {
-        installed,
+        installed: complete && same_version,
+        update: deps_marker.exists() && !same_version,
         root: root.to_string_lossy().to_string(),
         os: if cfg!(target_os = "macos") { "macos" } else { "windows" },
         required_bytes: steps::required_bytes(),
         free_bytes: steps::free_disk_bytes().ok(),
         models_bytes: models::total_bytes(),
     })
+}
+
+/// Versão do instalador que fez a última instalação completa.
+fn version_marker() -> Result<PathBuf, String> {
+    Ok(paths::root()?.join(".installer-version"))
 }
 
 /// Mensagem de falha para a tela. O erro técnico (saída do pip, códigos do
@@ -177,6 +189,7 @@ pub async fn run(rep: &Reporter) -> Result<InstallResult, String> {
         }
     };
 
+    let _ = std::fs::write(version_marker()?, env!("CARGO_PKG_VERSION"));
     rep.log(&format!("=== instalação concluída (acelerador: {accelerator}) ==="));
     Ok(InstallResult { accelerator, shortcuts, shortcut_hint })
 }

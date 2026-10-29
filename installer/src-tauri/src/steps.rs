@@ -152,10 +152,11 @@ const RELEASE_REPO: &str = "felvieira/deepfake-studio-live";
 /// direto em app/.
 pub async fn fetch_app_code(client: &reqwest::Client, rep: &Reporter) -> Result<(), String> {
     let dest = paths::app_dir()?;
-    if dest.join("run.py").exists() {
-        rep.done(Step::AppCode, "Aplicativo já instalado");
-        return Ok(());
-    }
+    // Versão do código instalado. Antes, bastava existir run.py para pular
+    // o passo — e quem rodava um instalador novo sobre uma instalação antiga
+    // continuava com o app antigo para sempre.
+    let tag_file = dest.join(".release-tag");
+    let installed_tag = std::fs::read_to_string(&tag_file).ok().map(|t| t.trim().to_string());
 
     rep.running(Step::AppCode, "Procurando a versão mais recente…");
 
@@ -188,6 +189,11 @@ pub async fn fetch_app_code(client: &reqwest::Client, rep: &Reporter) -> Result<
         .ok_or_else(|| "a versão publicada não tem código para baixar".to_string())?
         .to_string();
 
+    if dest.join("run.py").exists() && installed_tag.as_deref() == Some(tag.as_str()) {
+        rep.done(Step::AppCode, format!("Aplicativo {tag} já instalado"));
+        return Ok(());
+    }
+
     rep.running(Step::AppCode, format!("Baixando o aplicativo ({tag})…"));
     let archive = paths::root()?.join("app-source.tar.gz");
     download_resumable(
@@ -207,6 +213,7 @@ pub async fn fetch_app_code(client: &reqwest::Client, rep: &Reporter) -> Result<
     if !dest.join("run.py").exists() {
         return Err("o pacote baixado não contém run.py".into());
     }
+    let _ = std::fs::write(&tag_file, &tag);
     rep.done(Step::AppCode, format!("Aplicativo {tag} instalado"));
     Ok(())
 }

@@ -436,6 +436,9 @@ if (initial) {
         if (hint) setStatus(`Já instalado. ${hint}`);
       })
       .catch(() => {});
+  } else if (initial.update) {
+    go.textContent = "Atualizar";
+    setStatus("Há uma versão nova. Clique em Atualizar — o que já foi baixado é aproveitado.");
   } else {
     const free = initial.free_bytes != null ? `, ${gb(initial.free_bytes)} livres` : "";
     setStatus(`Precisa de ${gb(initial.required_bytes)}${free}`);
