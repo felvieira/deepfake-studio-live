@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Deepfake Studio Live Installer",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "com.felvieira.deepfake-studio-live.installer",
   "build": {
     "frontendDist": "../src"
@@ -23,12 +23,21 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.png"],
+    "targets": [
+      "nsis"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/icon.png"
+    ],
     "windows": {
       "nsis": {
         "installMode": "currentUser",
-        "languages": ["PortugueseBR", "English"]
+        "languages": [
+          "PortugueseBR",
+          "English"
+        ]
       }
     }
   }

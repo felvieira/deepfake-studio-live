@@ -86,12 +86,17 @@ fn launch_and_exit() -> ! {
     match launch::launch_app(after_ready) {
         Ok(_) => std::process::exit(0),
         Err(e) => {
-            platform::show_error(
-                "Deepfake Studio Live",
-                &format!(
-                    "Não consegui abrir o aplicativo.\n\n{e}\n\nAbra o instalador do Deepfake Studio Live e clique em Instalar para reparar."
-                ),
+            let text = format!(
+                "Não consegui abrir o aplicativo.\n\n{e}\n\nAbra o instalador do Deepfake Studio Live e clique em Instalar para reparar."
             );
+            // No CI não há ninguém para fechar o alerta: o erro vai para o
+            // terminal.
+            if std::env::var("DSL_NO_DIALOGS").as_deref() == Ok("1") {
+                platform::attach_parent_console();
+                eprintln!("LAUNCH FAILED: {text}");
+            } else {
+                platform::show_error("Deepfake Studio Live", &text);
+            }
             std::process::exit(1);
         }
     }

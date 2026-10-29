@@ -1,0 +1,102 @@
+name: Verify install
+
+# Instala o app do zero, como numa máquina limpa, em Windows e em macOS (Apple
+# Silicon), e confere que ele realmente funciona: o instalador roda sem
+# janela (--install-headless), o teste de fumaça carrega os modelos no
+# acelerador do sistema e faz uma inferência, e o atalho abre a janela do
+# app. Prints da interface e os logs ficam como artefato de cada execução.
+
+on:
+  push:
+    branches: [main, "feat/**"]
+    paths-ignore: ["**.md", "media/**", "ui-gallery/**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      DSL_NO_DIALOGS: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fora do checkout: o instalador copia o checkout para dentro da
+      # instalação, e uma instalação dentro do checkout se copiaria para
+      # dentro de si mesma.
+      - name: Pasta da instalação
+        shell: bash
+        run: echo "DSL_INSTALL_ROOT=$RUNNER_TEMP/dsl-install" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: installer/src-tauri
+
+      - name: Testes do instalador
+        working-directory: installer/src-tauri
+        run: cargo test
+
+      - name: Compilar o instalador
+        working-directory: installer/src-tauri
+        run: cargo build
+
+      # O executável está dentro do checkout, então o instalador usa o código
+      # deste commit (em vez de baixar o Release publicado).
+      - name: Instalar do zero (sem janela)
+        shell: bash
+        run: |
+          set -euo pipefail
+          exe=installer/src-tauri/target/debug/deepfake-studio-live-installer
+          [ -f "$exe.exe" ] && exe="$exe.exe"
+          "$exe" --install-headless
+
+      - name: Teste de fumaça
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$DSL_INSTALL_ROOT"
+          if [ "$RUNNER_OS" = "Windows" ]; then py="$root/python/python.exe"; else py="$root/python/bin/python3"; fi
+          cd "$root/app"
+          "$py" scripts/smoke_test.py "$GITHUB_WORKSPACE/smoke-output"
+
+      # Abre o app pelo mesmo caminho do atalho e espera a janela aparecer
+      # (DSL_EXIT_AFTER_READY fecha o app logo depois).
+      - name: Abrir o app pelo launcher
+        shell: bash
+        env:
+          DSL_EXIT_AFTER_READY: "1"
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            launcher="$HOME/Applications/Deepfake Studio Live.app/Contents/MacOS/Deepfake Studio Live"
+            test -x "$launcher"
+            plutil -lint "$HOME/Applications/Deepfake Studio Live.app/Contents/Info.plist"
+            "$launcher"
+          else
+            exe=installer/src-tauri/target/debug/deepfake-studio-live-installer.exe
+            "$exe" --launch
+          fi
+          test -f "$DSL_INSTALL_ROOT/logs/app.ready"
+          echo "janela do app apareceu"
+
+      - name: Guardar prints e logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-${{ matrix.os }}
+          path: |
+            smoke-output/
+            ${{ runner.temp }}/dsl-install/logs/
+          if-no-files-found: warn
