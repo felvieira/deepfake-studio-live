@@ -471,13 +471,15 @@ pub fn untar_strip_root(archive: &Path, dest: &Path) -> Result<(), String> {
 /// antigo fica para quem já o carregou, o novo arquivo assume o caminho
 /// registrado e as sobras são apagadas na próxima atualização.
 fn make_room(target: &Path) {
-    if std::fs::remove_file(target).is_ok() {
-        return;
-    }
     let mut aside = target.as_os_str().to_owned();
     aside.push(".dsl-old");
     let mut aside = PathBuf::from(aside);
-    if aside.exists() && std::fs::remove_file(&aside).is_err() {
+    // A sobra da atualização anterior, se nada mais a estiver usando.
+    let _ = std::fs::remove_file(&aside);
+    if std::fs::remove_file(target).is_ok() {
+        return;
+    }
+    if aside.exists() {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
@@ -611,6 +613,22 @@ mod make_room_tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"new");
 
         unsafe { FreeLibrary(module) };
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn clears_the_leftover_of_the_previous_update() {
+        let dir = std::env::temp_dir().join(format!("dsl-make-room-left-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("filter.dll");
+        let leftover = dir.join("filter.dll.dsl-old");
+        std::fs::write(&target, b"current").unwrap();
+        std::fs::write(&leftover, b"previous").unwrap();
+
+        make_room(&target);
+
+        assert!(!target.exists());
+        assert!(!leftover.exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

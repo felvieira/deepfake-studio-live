@@ -2,10 +2,10 @@
   <img src="media/brand/icon-128.png" alt="" width="96" height="96">
 </p>
 
-<h1 align="center">Deep-Live-Cam — Virtual Camera Edition</h1>
+<h1 align="center">Deepfake Studio Live</h1>
 
 <p align="center">
-  Real-time face swap that publishes straight to a virtual camera — no OBS required.
+  Real-time face swap that publishes straight to a virtual camera. A fork of Deep-Live-Cam.
 </p>
 
 <p align="center">
@@ -32,6 +32,8 @@ What this fork adds:
 | **Rebuilt interface** | File and Live are now two clear modes instead of one crowded panel. Advanced options are collapsed by default, so the common path stays short. |
 | **Installers for Windows and macOS** | A small installer that downloads everything — its own Python, the dependencies, ffmpeg, the AI models and the virtual camera — with real progress and resume. No terminal, no `pip`. |
 | **Bundled UnityCapture driver** | The driver ships in `third_party/`, so there is nothing extra to hunt down. |
+| **Honest GPU status** | A badge shows the GPU that was found and whether it is really in use, and models can be unloaded from the GPU with one click. |
+| **Works out of the box** | ffmpeg comes with the app, the interface follows the system language, and a loading screen appears while it starts. |
 
 Everything else behaves as upstream. If you want the original project, go there — it is the
 reference implementation and it is actively maintained.
@@ -92,6 +94,13 @@ macOS, needs about 10 GB free and an internet connection during setup.
 Every step resumes, so if a download breaks halfway, running it again picks up where it
 stopped. When it finishes it tells you whether hardware acceleration is active.
 
+**Updating**
+
+Run the newest installer over the existing one. Its button reads **Atualizar** instead of **Instalar**,
+downloads the new version of the app and keeps your models and settings.
+
+**Intel Macs** are not covered by the installer; use the source install below.
+
 **From source**
 
 Windows (needs Python 3.11–3.13 and the Visual C++ Build Tools):
@@ -143,6 +152,13 @@ The badge in the top-right corner shows the GPU that was found and whether it is
 use. If it says the GPU was found but is **not** in use, the accelerator failed to load and
 the app is running on the CPU — it works, just much slower. **Free GPU memory** (under the
 badge) unloads the models when you are done; stopping live mode does that automatically.
+
+---
+
+## Project status
+
+What is done, what was tested and what is still missing: [docs/STATUS.md](docs/STATUS.md).
+All the screens and options: [docs/telas.html](docs/telas.html) (download it and open it in a browser).
 
 ---
 

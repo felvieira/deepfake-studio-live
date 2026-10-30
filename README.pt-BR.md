@@ -2,10 +2,10 @@
   <img src="media/brand/icon-128.png" alt="" width="96" height="96">
 </p>
 
-<h1 align="center">Deep-Live-Cam — Edição Câmera Virtual</h1>
+<h1 align="center">Deepfake Studio Live</h1>
 
 <p align="center">
-  Troca de rosto em tempo real que publica direto numa câmera virtual — sem precisar de OBS.
+  Troca de rosto em tempo real que publica direto numa câmera virtual. Um fork do Deep-Live-Cam.
 </p>
 
 <p align="center">
@@ -32,6 +32,8 @@ O que este fork acrescenta:
 | **Interface reconstruída** | Arquivo e Ao vivo agora são dois modos separados, em vez de um painel só cheio de coisa. As opções avançadas ficam recolhidas, então o caminho comum é curto. |
 | **Instaladores para Windows e macOS** | Um instalador pequeno que baixa tudo — o próprio Python, as dependências, o ffmpeg, os modelos de IA e a câmera virtual — com progresso real e retomada. Sem terminal, sem `pip`. |
 | **Driver UnityCapture incluído** | O driver vem em `third_party/`, então não tem nada pra caçar por fora. |
+| **Status real da GPU** | Um selo mostra a placa encontrada e se ela está mesmo em uso, e um clique tira os modelos da memória da placa. |
+| **Funciona de primeira** | O ffmpeg vem junto, a interface segue o idioma do sistema e uma tela de carregamento aparece enquanto o app abre. |
 
 O resto funciona igual ao original. Se você quer o projeto original, vá lá — é a implementação
 de referência e tem manutenção ativa.
@@ -93,6 +95,13 @@ livres e de internet durante a instalação.
 Todos os passos retomam: se um download cair no meio, rodar de novo continua de onde parou.
 No fim ele diz se a aceleração por hardware está ativa.
 
+**Atualizar**
+
+Rode o instalador mais novo por cima do que já existe. O botão aparece como **Atualizar** em
+vez de **Instalar**, ele baixa a versão nova do app e mantém os modelos e as configurações.
+
+**Macs com Intel** não são cobertos pelo instalador; use a instalação pelo código-fonte, abaixo.
+
 **Pelo código-fonte**
 
 Windows (precisa de Python 3.11–3.13 e do Visual C++ Build Tools):
@@ -144,6 +153,13 @@ O selo no canto superior direito mostra a GPU encontrada e se ela está mesmo em
 que a GPU foi encontrada mas **não** está em uso, a aceleração não carregou e o app está
 rodando na CPU — funciona, só que bem mais devagar. **Liberar memória da GPU** (embaixo do
 selo) descarrega os modelos quando você termina; parar o modo ao vivo faz isso sozinho.
+
+---
+
+## Situação do projeto
+
+O que está pronto, o que foi testado e o que falta: [docs/STATUS.md](docs/STATUS.md).
+Todas as telas e opções: [docs/telas.html](docs/telas.html) (baixe e abra no navegador).
 
 ---
 
